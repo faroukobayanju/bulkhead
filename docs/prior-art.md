@@ -1,0 +1,15 @@
+# Prior art: products close to Drain Me (checked 2026-10-29)
+
+| Product | What it is | Overlap | What Drain Me adds |
+| --- | --- | --- | --- |
+| [Freysa](https://www.theblock.co/post/328659/players-are-trying-to-convince-this-ai-to-hand-over-her-40000-crypto-stash) | Paid-message game: talk an AI out of its ETH pot on Base. Act I won on attempt 482 for about $47k; four acts by 2026. | The closest one: real money, an agent guarding a wallet. | A TEE-attested agent (no "trust the dev"), native BTC through Chain Signatures, free entry, an open dataset, and a firewall product. |
+| [Neo "Escape the Matrix"](https://neonewstoday.com/gaming/neo-announces-escape-the-matrix-ai-agent-challenge-30k-prize-pool-available/) | An AI agent challenge on Neo X with a $30k pool. | An arena with crypto prizes. | Same differences as Freysa. |
+| [Gray Swan Arena](https://app.grayswan.ai) ([Fortune, Oct 20 2026](https://fortune.com/2026/10/20/exclusive-ai-security-company-gray-swan-red-team-arena-contest-to-jailbreak-ai-agents/)) | Crowdsourced red-teaming of frontier models; $300k indirect prompt injection contest live now. | Prompt-injection prizes. | Their targets are sandboxed models and their data stays private. Drain Me's targets are real wallets, with public data and verifiable agents. |
+| [Lakera Gandalf and Lakera Guard](https://www.securityweek.com/check-point-to-acquire-ai-security-firm-lakera/amp/) | Gandalf is a prompt-injection game (80M+ attack points); Guard is a runtime firewall API. Check Point acquired Lakera in 2025. | Game to dataset to firewall API: the same flywheel. | Built for wallet agents, attested and signed verdicts, an open dataset, on-chain enforcement. |
+| HackAPrompt | Prompt-hacking competitions with partly published datasets. | Competitive red-teaming. | Real on-chain stakes. |
+| [AgentGuard (Solana)](https://github.com/0xAxiom/agentguard) | Hackathon middleware: transaction firewall, prompt-injection patterns, spend limits. | A firewall for wallet agents. | A measured block rate on real attacks, TEE attestation, a live arena. |
+| [WalletGuard (Chainlink hackathon)](https://chain.link/hack-26/projects/walletguard) | Agent submits an intent; a Chainlink workflow returns allow, warn or block plus a receipt hash. | Pre-sign transaction checks. | LLM-input defense plus on-chain enforcement through a FunctionCall key. |
+| [Guardian (OKX / X Layer)](https://hackquest.io/projects/Guardian-GfqfQo) | ALLOW/WARN/DENY on proposed transactions. | Transaction gatekeeper. | Prompt-level defense plus a public benchmark. |
+| [Pipelock](https://glama.ai/mcp/servers/luckyPipewrench/pipelock), [CogniWall](https://pypi.org/project/cogniwall/) | General agent egress and prompt firewalls (pattern based). | Injection defense. | Crypto-specific, attested, measured on an open arena. |
+
+Incident evidence: [Grok/Bankr Morse-code drain, May 2026 (~$150–200k)](https://oecd.ai/en/incidents/2026-05-04-4a73) and [AIXBT dashboard compromise, March 2025 (55.5 ETH)](https://www.theblock.co/news/regulation/2025-03-18-ai-crypto-bot-aixbt-lost-eth-hack-unauthorized-dashboard-access-346911).

@@ -1,0 +1,8 @@
+node_modules
+target
+.env*
+!.env.example
+.next
+.vercel
+.claude/settings.local.json
+.DS_Store
