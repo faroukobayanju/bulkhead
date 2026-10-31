@@ -14,6 +14,8 @@ testnet-short-timelock = []
 near-sdk = "5.30.0"
 bech32 = "0.11"
 sha3 = "0.10"
+hex = "0.4"
+omni-transaction = { version = "0.5.0", default-features = false, features = ["bitcoin", "evm"] }
 
 [dev-dependencies]
 near-sdk = { version = "5.30.0", features = ["unit-testing"] }
@@ -21,6 +23,10 @@ near-workspaces = "0.24.0"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 serde_json = "1"
+# independent oracles for the tx builders: never linked into the wasm
+bitcoin = "0.32"
+alloy-consensus = "2.5"
+alloy-primitives = "1.7"
 
 [profile.release]
 codegen-units = 1

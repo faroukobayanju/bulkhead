@@ -3,6 +3,8 @@ use near_sdk::store::{IterableMap, IterableSet};
 use near_sdk::{env, ext_contract, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise, PromiseError};
 
 pub mod address;
+pub mod btc;
+pub mod evm;
 
 #[cfg(feature = "testnet-short-timelock")]
 const TIMELOCK_NS: u64 = 60_000_000_000;
