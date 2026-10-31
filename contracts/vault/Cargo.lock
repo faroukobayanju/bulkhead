@@ -237,6 +237,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bulkhead-vault"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bech32",
+ "near-sdk",
+ "near-workspaces",
+ "serde_json",
+ "sha3 0.10.9",
+ "tokio",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -765,19 +778,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
-]
-
-[[package]]
-name = "drainme-vault"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bech32",
- "near-sdk",
- "near-workspaces",
- "serde_json",
- "sha3 0.10.9",
- "tokio",
 ]
 
 [[package]]
