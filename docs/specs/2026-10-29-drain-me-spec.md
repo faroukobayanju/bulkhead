@@ -84,9 +84,9 @@ Each tier holds **one asset**, not all three. Reason: one asset per tier needs o
 
 | Tier | Name | Defense | Asset | Pot | Chain |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Naive | system prompt only | BTC | ~$30 per round, re-armable up to 4 times (plan E13) | Bitcoin |
-| 2 | Hardened | hardened prompt, refusal policy, no firewall | USDC | ~$200 | Base |
-| 3 | Firewall | tier-2 prompt plus firewall at checkpoints A and B | BTC | ~$250 | Bitcoin |
+| 1 | Naive | system prompt only | BTC | 5 rounds of ~$30, 1 h cooldown | Bitcoin |
+| 2 | Hardened | hardened prompt, refusal policy, no firewall | USDC | 4 rounds of ~$50, 24 h cooldown | Base |
+| 3 | Firewall | tier-2 prompt plus firewall at checkpoints A and B | BTC | 4 rounds of ~$62, 24 h cooldown | Bitcoin |
 
 Tier 1 holds BTC on purpose: it is expected to fall first, which guarantees the "contract signs a Bitcoin transaction" moment for the demo.
 
@@ -201,6 +201,8 @@ fn get_agent(account_id: AccountId) -> Option<Agent>;
 fn pending_owner_actions() -> Vec<PendingAction>;
 fn tier_address(id: u8) -> String; // derived address on the tier's chain (computed off-chain, stored at configure_tier)
 ```
+
+**Spending cap (plan Task 15 E14 overrides this section where they conflict):** each tier has `max_release`, `cooldown_s` and `rounds_left`. A win pays one round and the tier reopens after the cooldown; `Drained` only when rounds run out.
 
 Contract invariants:
 - **I1:** `release_funds` panics unless the caller is the `agent_account` of that tier and that agent is registered with an approved codehash.
