@@ -4,7 +4,7 @@ A verifiable prompt-injection arena that produces an agent firewall. Built for N
 
 Three AI agents guard real BTC and USDC in a NEAR vault contract. Attackers try to talk them into paying out. Every attack feeds an open dataset and a firewall API with a measured block rate.
 
-**Status:** planning only. No product code is written before 2026-11-01 00:00 UTC (hackathon rule).
+**Status:** in development. The repository was created on 2026-10-29, inside the eligible window that HACKATHON.md Q-001 opens on 2026-10-19, so all code here is new work. There is no pre-hackathon baseline.
 
 ## Read first
 1. `docs/specs/2026-10-29-drain-me-spec.md`: what we are building and why.
