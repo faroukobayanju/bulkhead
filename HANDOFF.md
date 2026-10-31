@@ -7,7 +7,7 @@ Building is allowed now (HACKATHON.md Q-001: eligible work starts 2026-10-19).
 | | Person A: chain side (@haikeysgit) | Person B: AI side (Farouk) |
 | --- | --- | --- |
 | Tasks | 0 (S1, S3), 1, 2, 3, 4, 10, 13 launch, Task 15 E1–E3, E7, E12 contract items, E14 contract part, E19 | 0 (S2), 5, 6, 7, 8, 9, 11, 12, Task 15 E4–E6, E8–E11, E14 agent and web part, E15, E16, E17 |
-| Folders | `contracts/`, `scripts/` (chain scripts) | `agent/`, `shared/`, `web/`, `data/`, `db/` |
+| Folders | `contracts/`, `scripts/` (chain scripts) | `agent/`, `shared/`, `web/`, `data/`, `convex/` |
 
 ## Start now
 - **Person B, spike S2:** list NEAR AI Cloud models; pick 2 with reliable tool calls (10/10); run 10 identical temperature-0 calls and record whether outputs differ; save the attestation report keys. Record everything in `docs/spikes.md`.
@@ -27,7 +27,7 @@ Building is allowed now (HACKATHON.md Q-001: eligible work starts 2026-10-19).
 ## Interface freeze (end of day 2), owned jointly
 - Contract call: `release_funds(tier_id, attempt_id, recipient, payload)` (Tasks 3 and 4), authorization by approved codehash (E1), and the cap fields and errors `ERR_OVER_CAP` / `ERR_COOLDOWN` (E14).
 - Agent registration and attestation check (Task 10).
-- Attempt row schema (`db/schema.sql` + Task 15 E6/E7/E8).
+- Attempt row schema (`convex/schema.ts`; Task 15 E6/E7/E8/E20).
 - HTTP contract between web and agent (Task 9 routes + E12 proxy routes).
 
 After the freeze, change any of these only by PR, with both people reviewing.
