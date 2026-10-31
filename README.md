@@ -1,6 +1,6 @@
-# Drain Me
+# Bulkhead
 
-A verifiable prompt-injection arena that produces an agent firewall. Built for NEAR HACKATHON (Nov 1–14, 2026).
+When your AI agent gets tricked, only one compartment floods. Bulkhead is a firewall and contract-enforced spending cap for agents that hold money, proven in **Drain Me**, its live arena. Built for NEAR HACKATHON (Nov 1–14, 2026).
 
 Three AI agents guard real BTC and USDC in a NEAR vault contract. Attackers try to talk them into paying out. Every attack feeds an open dataset and a firewall API with a measured block rate.
 

@@ -1,5 +1,7 @@
 # Team handoff
 
+Project name: **Bulkhead**. The live arena keeps the name **Drain Me**.
+
 | | Person A: chain side (Farouk) | Person B: AI side (@haikeysgit) |
 | --- | --- | --- |
 | Tasks | 0 (S1, S3), 1, 2, 3, 4, 10, 13 launch, Task 15 E1–E3, E7, E12 contract items, E14 contract part, E19 | 0 (S2), 5, 6, 7, 8, 9, 11, 12, Task 15 E4–E6, E8–E11, E14 agent and web part, E15, E16, E17 |

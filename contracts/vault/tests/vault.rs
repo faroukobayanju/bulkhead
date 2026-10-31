@@ -5,7 +5,7 @@ use serde_json::json;
 // Agents must attach this, not max_gas: prepaid gas is reserved against the key allowance
 // up front, and max_gas reserves more than the 1 NEAR allowance.
 const AGENT_GAS: Gas = Gas::from_tgas(300);
-const VAULT: &str = "../target/near/drainme_vault/drainme_vault.wasm";
+const VAULT: &str = "../target/near/bulkhead_vault/bulkhead_vault.wasm";
 const SIGNER: &str = "../target/near/mock_signer/mock_signer.wasm";
 const BTC_TO: &str = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx";
 
