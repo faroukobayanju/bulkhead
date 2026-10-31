@@ -1,12 +1,8 @@
 # Team handoff
 
-<<<<<<< HEAD
-Project name: **Bulkhead**. The live arena keeps the name **Drain Me**.
-=======
 Project name: **Bulkhead**. The live arena keeps the name **Drain Me**. Docs and paths still say `drain-me` in places; both refer to this project.
 
 Building is allowed now (HACKATHON.md Q-001: eligible work starts 2026-10-19).
->>>>>>> main
 
 | | Person A: chain side (Farouk) | Person B: AI side (@haikeysgit) |
 | --- | --- | --- |
