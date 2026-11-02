@@ -86,6 +86,47 @@ describe("spend accounting", () => {
     expect(r.usage).toBeNull();
   });
 
+  // A reply that claims absurd usage must not push the day's spend to Infinity (or past the cap for good): it counts as missing.
+  test.each([
+    ["prompt_tokens 1e308", { prompt_tokens: 1e308, completion_tokens: 10 }],
+    ["completion_tokens 1e308", { prompt_tokens: 10, completion_tokens: 1e308 }],
+    ["both 1e308", { prompt_tokens: 1e308, completion_tokens: 1e308 }],
+    ["Number.MAX_VALUE", { prompt_tokens: Number.MAX_VALUE, completion_tokens: Number.MAX_VALUE }],
+    ["prompt_tokens just over 10 million", { prompt_tokens: 10_000_001, completion_tokens: 10 }],
+    ["completion_tokens just over 10 million", { prompt_tokens: 10, completion_tokens: 10_000_001 }],
+  ])("usage with %s counts the worst case and keeps spend finite", async (_, usage) => {
+    const s = setup({ fetch: async () => json(reply(usage)) });
+    const r = await s.ai.chat(req());
+    expect(r.usage).toBeNull();
+    const spent = await s.spent();
+    expect(Number.isFinite(spent)).toBe(true);
+    expect(spent).toBe(bytes(MSGS) + 800);
+    // another call neither poisons nor unsticks the total
+    await s.ai.chat(req()).catch(() => {});
+    expect(Number.isFinite(await s.spent())).toBe(true);
+  });
+
+  test("10 million tokens is the edge of what is believed", async () => {
+    const s = setup({ fetch: async () => json(reply({ prompt_tokens: 10_000_000, completion_tokens: 1 })) });
+    const r = await s.ai.chat(req());
+    expect(r.usage).toEqual({ prompt_tokens: 10_000_000, completion_tokens: 1 });
+    expect(await s.spent()).toBe(10_000_002);
+  });
+
+  test("a price that makes the worst case infinite refuses the call and records nothing", async () => {
+    const s = setup({ prices: { m: { in: 1e308, out: 1e308 } } });
+    expect((await failure(s.ai.chat(req()))).code).toBe("spend_cap");
+    expect(s.calls.length).toBe(0);
+    expect(await s.spent()).toBe(0);
+  });
+
+  test("a price so large that sane usage costs more than a float can hold is refused", async () => {
+    const s = setup({ prices: { m: { in: 1e300, out: 1e300 } } });
+    expect((await failure(s.ai.chat(req()))).code).toBe("spend_cap");
+    expect(s.calls.length).toBe(0);
+    expect(Number.isFinite(await s.spent())).toBe(true);
+  });
+
   test("zero prompt_tokens with real completion_tokens is usable", async () => {
     const s = setup({ fetch: async () => json(reply({ prompt_tokens: 0, completion_tokens: 5 })) });
     await s.ai.chat(req());

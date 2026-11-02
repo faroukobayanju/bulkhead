@@ -46,7 +46,11 @@ export function dailyLimitUsd(env: Record<string, string | undefined>): number {
 }
 
 const isCount = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0;
-const isPrice = isCount; // finite and non-negative: a NaN or negative price would make spend NaN or negative and switch the cap off
+const isPrice = isCount;
+// More tokens than any context window holds: a reply claiming more is lying or broken, so its usage is not believed.
+// Without a bound, 1e308 tokens would push the day's spend to Infinity.
+const MAX_USAGE_TOKENS = 10_000_000;
+const isTokens = (n: unknown): n is number => isCount(n) && n <= MAX_USAGE_TOKENS; // finite and non-negative: a NaN or negative price would make spend NaN or negative and switch the cap off
 
 // Before a call the worst case is reserved with a capped add, so calls in flight together cannot pass the cap; afterwards the
 // reservation is settled to the actual cost. A call that fails keeps the worst case: the model may have run and billed.
@@ -132,9 +136,12 @@ export function makeNearAI(o: {
       } catch {}
       const choice = body?.choices?.[0];
       if (!choice || typeof choice.message !== "object" || choice.message === null) return fail(new NearAIError("bad_response", "NEAR AI response has no message"));
-      // A reply that did generate text but reports zero completion tokens is not trusted: count it as missing usage.
+      // Usage that is missing, zero in completion tokens (a reply that did generate text), above the bound, or priced to a
+      // non-finite cost is not trusted: it counts as missing, so the call stays at the worst case.
       const u = body.usage;
-      const usage = isCount(u?.prompt_tokens) && isCount(u?.completion_tokens) && u.completion_tokens > 0 ? { prompt_tokens: u.prompt_tokens, completion_tokens: u.completion_tokens } : null;
+      let usage = isTokens(u?.prompt_tokens) && isTokens(u?.completion_tokens) && u.completion_tokens > 0 ? { prompt_tokens: u.prompt_tokens, completion_tokens: u.completion_tokens } : null;
+      // (Belt and braces: the reservation already refuses a price that overflows, so this only fires if that ever changes.)
+      if (usage && !Number.isFinite(cost(usage.prompt_tokens, usage.completion_tokens))) usage = null;
       const actual = usage ? cost(usage.prompt_tokens, usage.completion_tokens) : worst;
       await alertOnce(day, actual === worst ? reserved : (await o.counter.add(key, actual - worst))!);
       return {
