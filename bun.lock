@@ -18,6 +18,12 @@
         "typescript": "5.9.3",
       },
     },
+    "scripts": {
+      "name": "bulkhead-scripts",
+      "dependencies": {
+        "@noble/hashes": "1.8.0",
+      },
+    },
     "shared": {
       "name": "bulkhead-shared",
       "dependencies": {
@@ -77,6 +83,8 @@
     "brorand": ["brorand@1.1.0", "", {}, "sha512-cKV8tMCEpQs4hK/ik71d6LrPOnpkpGBR0wzxqr68g2m/LB2GxVYQroAjMJZRVM1Y4BCjCKc3vAamxSzOY2RP+w=="],
 
     "bulkhead-agent": ["bulkhead-agent@workspace:agent"],
+
+    "bulkhead-scripts": ["bulkhead-scripts@workspace:scripts"],
 
     "bulkhead-shared": ["bulkhead-shared@workspace:shared"],
 

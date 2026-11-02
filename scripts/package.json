@@ -1,0 +1,7 @@
+{
+  "name": "bulkhead-scripts",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "bun test" },
+  "dependencies": { "@noble/hashes": "1.8.0" }
+}
