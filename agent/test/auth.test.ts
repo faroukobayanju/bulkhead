@@ -95,6 +95,72 @@ describe("verifyNep413", () => {
   });
 });
 
+// A wallet that redirects (MyNearWallet through wallet-selector) signs Some(callbackUrl). The URL is part of the signed
+// bytes, so taking it from the client cannot be used to forge anything.
+describe("callbackUrl", () => {
+  const url = "https://app.mynearwallet.com/login?next=%2Ftier%2F1";
+  const signCb = (nonce: Uint8Array, callbackUrl?: string, key = kp) =>
+    b64(key.sign(nep413Hash({ message: LOGIN_MESSAGE, nonce, recipient: LOGIN_RECIPIENT, callbackUrl })).signature);
+  const withUrl = (nonce: Uint8Array, callbackUrl: unknown, signature = signCb(nonce, callbackUrl as string)) =>
+    msgFor(nonce, { callbackUrl, signature });
+  const bad = { ok: false, reason: "bad_sig" } as const;
+  const sized = (bytes: number) => "https://x.test/" + "a".repeat(bytes - 15);
+
+  test("a signature over the URL passes", async () => {
+    const now = Date.now();
+    const { calls, lookup } = spy();
+    expect(await verifyNep413(withUrl(makeNonce(now), url), now, lookup)).toEqual({ ok: true });
+    expect(calls).toEqual([["a.near", pub]]);
+  });
+
+  test("the signed URL swapped for another fails, and does not burn the nonce", async () => {
+    const now = Date.now();
+    const nonce = makeNonce(now);
+    const before = usedNonceCount();
+    expect(await verifyNep413(withUrl(nonce, "https://evil.example/login", signCb(nonce, url)), now, keyOk)).toEqual(bad);
+    expect(usedNonceCount()).toBe(before);
+    expect(await verifyNep413(withUrl(nonce, url), now, keyOk)).toEqual({ ok: true });
+  });
+
+  test("a signature made without the URL fails when one is supplied", async () => {
+    const now = Date.now();
+    const nonce = makeNonce(now);
+    expect(await verifyNep413(withUrl(nonce, url, signCb(nonce)), now, keyOk)).toEqual(bad);
+  });
+
+  test("a signature made with the URL fails when none is supplied", async () => {
+    const now = Date.now();
+    const nonce = makeNonce(now);
+    expect(await verifyNep413(msgFor(nonce, { signature: signCb(nonce, url) }), now, keyOk)).toEqual(bad);
+  });
+
+  test("an empty URL is Some(\"\"), not None", async () => {
+    const now = Date.now();
+    const nonce = makeNonce(now);
+    expect(await verifyNep413(withUrl(nonce, "", signCb(nonce)), now, keyOk)).toEqual(bad);
+    expect(await verifyNep413(withUrl(nonce, ""), now, keyOk)).toEqual({ ok: true });
+  });
+
+  test.each([5, null, true, {}, [], ["https://x.test"]])("a URL that is %p is bad_sig", async callbackUrl => {
+    const now = Date.now();
+    const nonce = makeNonce(now);
+    const { calls, lookup } = spy();
+    expect(await verifyNep413(withUrl(nonce, callbackUrl, signCb(nonce)), now, lookup)).toEqual(bad);
+    expect(await verifyNep413(withUrl(nonce, callbackUrl, signCb(nonce, url)), now, lookup)).toEqual(bad);
+    expect(calls).toEqual([]);
+  });
+
+  test("up to 2048 bytes is accepted, more is bad_sig, counted in bytes", async () => {
+    const now = Date.now();
+    const { calls, lookup } = spy();
+    const ok = [sized(2048), "é".repeat(1024)]; // the second is 1024 characters but 2048 bytes
+    const tooBig = [sized(2049), "é".repeat(1025), "é".repeat(1024) + "a"];
+    for (const u of ok) expect(await verifyNep413(withUrl(makeNonce(now), u), now, keyOk)).toEqual({ ok: true });
+    for (const u of tooBig) expect(await verifyNep413(withUrl(makeNonce(now), u), now, lookup)).toEqual(bad);
+    expect(calls).toEqual([]); // each was validly signed, so only the size limit refused it
+  });
+});
+
 describe("check order", () => {
   test("recipient, message, nonce and expiry, signature, lookupKey, replay", async () => {
     const now = Date.now();
@@ -137,12 +203,22 @@ describe("malformed input never throws", () => {
     ["public key that is too short", { publicKey: "ed25519:abc" }, "bad_sig"],
     ["public key with extra parts", { publicKey: `${pub}:abc` }, "bad_sig"],
     ["public key on an unknown curve", { publicKey: pub.replace("ed25519:", "rsa:") }, "bad_sig"],
-    ["all-zero public key", { publicKey: key(new Uint8Array(32)) }, "bad_sig"],
-    ["public key that is not a curve point", { publicKey: key(new Uint8Array(32).fill(0xff)) }, "bad_sig"],
+    // The next two only show that odd keys do not throw. They end in bad_sig because the signature belongs to another
+    // key, not because such keys are refused: small-order keys are not rejected, the key must already be on the account.
+    ["all-zero public key, with another key's signature", { publicKey: key(new Uint8Array(32)) }, "bad_sig"],
+    ["non-curve-point public key, with another key's signature", { publicKey: key(new Uint8Array(32).fill(0xff)) }, "bad_sig"],
     ["public key that is a number", { publicKey: 5 }, "bad_sig"],
     ["public key that is null", { publicKey: null }, "bad_sig"],
     ["account id that is a number", { accountId: 5 }, "bad_sig"],
+    ["two-digit number as account id", { accountId: 55 }, "bad_sig"],
     ["missing account id", { accountId: undefined }, "bad_sig"],
+    ["empty account id", { accountId: "" }, "bad_sig"],
+    ["one-character account id", { accountId: "a" }, "bad_sig"],
+    ["uppercase account id", { accountId: "A.NEAR" }, "bad_sig"],
+    ["account id with a space", { accountId: "a b" }, "bad_sig"],
+    ["account id with a trailing newline", { accountId: "a.near\n" }, "bad_sig"],
+    ["65-character account id", { accountId: "a".repeat(65) }, "bad_sig"],
+    ["100,000-character account id", { accountId: "a".repeat(100_000) }, "bad_sig"],
     ["message that is a number", { message: 5 }, "bad_sig"],
     ["recipient that is a number", { recipient: 5 }, "bad_recipient"],
     ["missing recipient", { recipient: undefined }, "bad_recipient"],
@@ -155,6 +231,13 @@ describe("malformed input never throws", () => {
       expect(calls).toEqual([]);
       expect(usedNonceCount()).toBe(before);
     });
+
+  test.each(["ab", "a".repeat(64), "a.b-c_d0", "0x" + "ab".repeat(20)])("account id %p is accepted", async accountId => {
+    const { calls, lookup } = spy();
+    const n = makeNonce(now);
+    expect(await verifyNep413(msgFor(n, { accountId }), now, lookup)).toEqual({ ok: true });
+    expect(calls).toEqual([[accountId, pub]]);
+  });
 
   test.each([null, undefined, "login", 42, [], {}])("message that is %p", async m => {
     const r = await verifyNep413(m as unknown as AuthMsg, now, keyOk);
@@ -292,6 +375,32 @@ describe("NEP-413 hash and nonce", () => {
     expect(sha(payload)).toBe(digest);
     const nonce = Uint8Array.from({ length: 32 }, (_, i) => 255 - i);
     expect(hex(nep413Hash({ message: "héllo ✓", nonce, recipient: "bulkhead.example" }))).toBe(digest);
+  });
+
+  // callbackUrl: Option<string>. Some is the byte 01 followed by a borsh string. Digests from Python's hashlib; the
+  // borsh library gives the same bytes for both URLs.
+  test("encodes a callbackUrl as Option Some", () => {
+    const payload =
+      "9d010080" +
+      "0d000000" + "647261696e6d652d6c6f67696e" +
+      "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" +
+      "0b000000" + "647261696e6d652e617070" +
+      "01" + "1a000000" + "68747470733a2f2f647261696e6d652e6170702f746965722f32"; // "https://drainme.app/tier/2"
+    const digest = "ea651e4837baaafe9a62b221018e12baa283558b09fb95b4d9d8ae0f89c2c421";
+    expect(sha(payload)).toBe(digest);
+    const p = { message: "drainme-login", nonce: ascending, recipient: "drainme.app" };
+    expect(hex(nep413Hash({ ...p, callbackUrl: "https://drainme.app/tier/2" }))).toBe(digest);
+    expect(hex(nep413Hash({ ...p, callbackUrl: "https://app.mynearwallet.com/login?next=%2Ftier%2F1" }))).toBe(
+      "30ea139a6b999b46057f9240ef088d5cd0eee946135c4c284630c3f2c74109b4",
+    );
+  });
+
+  test("an absent or undefined callbackUrl is still None", () => {
+    const none = "50d62b0f9f88bc04e1a21b21c41042a125d7571845eb57708279325897b869c4";
+    const p = { message: "drainme-login", nonce: ascending, recipient: "drainme.app" };
+    expect(hex(nep413Hash(p))).toBe(none);
+    expect(hex(nep413Hash({ ...p, callbackUrl: undefined }))).toBe(none);
+    expect(hex(nep413Hash({ ...p, callbackUrl: "" }))).not.toBe(none); // Some("") is not None
   });
 
   test("refuses a nonce that is not 32 bytes", () => {

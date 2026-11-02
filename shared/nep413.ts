@@ -27,8 +27,9 @@ export function makeNonce(ms: number): Uint8Array {
 }
 
 // sha256(u32le tag ++ borsh{ message, nonce, recipient, callbackUrl }), the bytes a NEP-413 wallet signs.
-// ponytail: callbackUrl is always None; add an optional field if a wallet flow ever signs one.
-export function nep413Hash(p: { message: string; nonce: Uint8Array; recipient: string }): Uint8Array {
+// callbackUrl is Option<string>: undefined is None (one 0 byte), a string is Some (a 1 byte, then a borsh string).
+export function nep413Hash(p: { message: string; nonce: Uint8Array; recipient: string; callbackUrl?: string }): Uint8Array {
   if (p.nonce.length !== 32) throw new Error("NEP-413 nonce must be 32 bytes");
-  return sha256(concatBytes(u32le(TAG), borshString(p.message), p.nonce, borshString(p.recipient), Uint8Array.of(0)));
+  const callback = p.callbackUrl === undefined ? Uint8Array.of(0) : concatBytes(Uint8Array.of(1), borshString(p.callbackUrl));
+  return sha256(concatBytes(u32le(TAG), borshString(p.message), p.nonce, borshString(p.recipient), callback));
 }

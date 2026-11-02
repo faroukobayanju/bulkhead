@@ -11,6 +11,7 @@ export type AuthMsg = {
   message: string;
   nonce: string; // base64, 32 bytes
   recipient: string;
+  callbackUrl?: string; // signed by the wallet as Some(url) when present; part of the signed bytes, so safe to take from the client
 };
 export type AuthResult =
   | { ok: true }
@@ -18,8 +19,11 @@ export type AuthResult =
 
 const TTL_MS = 300_000;
 const SKEW_MS = 60_000; // how far ahead of `now` a nonce timestamp may be
+const MAX_CALLBACK_BYTES = 2048;
+const ACCOUNT_ID = /^[a-z0-9._-]{2,64}$/;
 
-// ponytail: in-memory replay set, single agent instance; move to Postgres with the rate limiter if the CVM ever runs >1 replica
+// ponytail: in-memory replay set, single agent instance. A restart clears it, so a captured login can replay for up to
+// 5 minutes (the nonce TTL) after one; move to Postgres with the rate limiter if the CVM ever restarts often or runs >1 replica
 const used = new Map<string, number>(); // canonical base64 nonce -> last `now` at which it is still remembered
 export const usedNonceCount = () => used.size;
 
@@ -73,9 +77,12 @@ export async function verifyNep413(
 
   const sig = decode(m.signature, 64);
   const pk = ed25519Key(m.publicKey);
-  const accountId = m.accountId;
-  const hash = nep413Hash({ message: LOGIN_MESSAGE, nonce, recipient: LOGIN_RECIPIENT });
-  if (!sig || !pk || typeof accountId !== "string" || !verifies(pk, hash, sig)) return fail("bad_sig");
+  const { accountId, callbackUrl } = m;
+  if (!sig || !pk || typeof accountId !== "string" || !ACCOUNT_ID.test(accountId)) return fail("bad_sig");
+  if (callbackUrl !== undefined && (typeof callbackUrl !== "string" || Buffer.byteLength(callbackUrl) > MAX_CALLBACK_BYTES))
+    return fail("bad_sig");
+  const hash = nep413Hash({ message: LOGIN_MESSAGE, nonce, recipient: LOGIN_RECIPIENT, callbackUrl });
+  if (!verifies(pk, hash, sig)) return fail("bad_sig");
 
   // A rejection here (RPC down) propagates: the caller must not tell the user their key is wrong, and the nonce stays unused.
   if (!(await lookupKey(accountId, pk.toString()))) return fail("key_not_on_account");
