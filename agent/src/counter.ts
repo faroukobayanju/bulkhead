@@ -1,6 +1,7 @@
 // Daily counters for the firewall budgets and the NEAR AI spend cap.
 // ponytail: in-memory, single agent instance. A restart resets every count, so a restart can hand out a day's budget twice;
-// Task 8 injects Convex counters (same interface) before launch. Keys of past days stay in the map until restart.
+// production injects the Convex counter instead (makeDb(...).counter in db.ts, same interface, atomic capped add).
+// Keys of past days stay in the map until restart.
 export type Counter = {
   get(key: string): Promise<number>;
   // Add n and return the new total. With `cap`, adds nothing and returns null when the new total would pass it.
