@@ -459,6 +459,46 @@ describe("validation", () => {
   });
 });
 
+// JSON.parse turns 1e999 into Infinity, which passes shape validation but cannot be canonicalized for input_hash.
+describe("numbers JSON cannot carry", () => {
+  const spies: ReturnType<typeof spyOn>[] = [];
+  afterEach(() => spies.splice(0).forEach(s => s.mockRestore()));
+  const prefix = '{"messages":[{"role":"user","content":"hi"}],"proposed_action":{"tool":"t","args":';
+  test.each([
+    ["1e999", `${prefix}{"x":1e999}}}`],
+    ["a nested -1e999", `${prefix}{"a":[{"b":{"c":-1e999}}]}}}`],
+    ["a bare 1e999 in an array", `${prefix}{"a":[1,2,1e999]}}}`],
+    ["1e400 spelled with a plus", `${prefix}{"x":1E+400}}}`],
+  ])("%s is 400 bad_request in the envelope, with no charge, no judge call and no log", async (_, body) => {
+    const logged: string[] = [];
+    for (const m of ["log", "info", "warn", "error", "debug"] as const) spies.push(spyOn(console, m).mockImplementation((...a: unknown[]) => void logged.push(a.map(String).join(" "))));
+    for (const call of [(s: ReturnType<typeof setup>) => s.withKey(body), (s: ReturnType<typeof setup>) => s.playground(body)]) {
+      const s = setup();
+      const r = await call(s);
+      expect(r.status).toBe(400);
+      expect(r.headers.get("content-type")).toContain("application/json");
+      const { error } = (await r.json()) as any;
+      expect(error.code).toBe("bad_request");
+      expect(error.fix.length).toBeGreaterThan(0);
+      expect(s.seen.length).toBe(0);
+      expect(await s.counter.get(`fw:api:${utcDay(T0)}`)).toBe(0);
+      expect(await s.counter.get(`fw:playground:${utcDay(T0)}`)).toBe(0);
+    }
+    expect(logged).toEqual([]);
+  });
+
+  test("huge but finite numbers are still fine", async () => {
+    const s = setup();
+    const r = await s.withKey(`${prefix}{"x":1e308,"y":-1e308,"z":5e-324}}}`);
+    expect(r.status).toBe(200);
+  });
+
+  test("the request is rejected even when the judge would have failed", async () => {
+    const s = setup({ judge: async () => { throw new Error("down"); } });
+    expect((await s.withKey(`${prefix}{"x":1e999}}}`)).status).toBe(400);
+  });
+});
+
 describe("budgets", () => {
   test("over the key's daily quota is 503 budget_exhausted, never a fake block, and no judge call", async () => {
     const s = setup({ limits: { apiKey: 2 } });

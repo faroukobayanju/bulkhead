@@ -52,7 +52,7 @@ Every other failure is `{"error": {"code", "message", "fix"}}`. A 429 also carri
 | 429 | `rate_limited` | wait `Retry-After` seconds |
 | 413 | `body_too_large` | send at most 16,384 bytes |
 | 400 | `bad_json` | the body is not JSON |
-| 400 | `bad_request` | the body does not match the request table |
+| 400 | `bad_request` | the body does not match the request table, or holds a number JSON cannot carry (such as `1e999`) |
 | 503 | `budget_exhausted` | the daily budget is used up; it resets at 00:00 UTC |
 | 503 | `budget_unavailable` | the budget could not be read; retry |
 | 503 | `key_lookup_unavailable` | keys could not be checked; retry |

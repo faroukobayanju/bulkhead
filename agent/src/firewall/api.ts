@@ -167,6 +167,14 @@ export function firewallRoutes(app: Hono, deps: FirewallDeps) {
     }
     const req = parseReq(json);
     if (typeof req === "string") return fail(c, 400, "bad_request", req, 'Send {"messages":[{"role":"user","content":"..."}],"proposed_action":{"tool":"...","args":{}}}.');
+    // The hash is computed here, before anything is charged or judged. JSON.parse reads 1e999 as Infinity, which passes the
+    // shape checks but has no canonical JSON, so such a request is a bad request, not a failure after a paid judge call.
+    let input_hash: string;
+    try {
+      input_hash = inputHash(req);
+    } catch {
+      return fail(c, 400, "bad_request", "A number in the request is too large for JSON (such as 1e999).", "Use numbers JSON can carry, or send the value as a string.");
+    }
 
     // 5. daily budget: only a request the judge will actually run is counted
     let ok: boolean;
@@ -180,7 +188,7 @@ export function firewallRoutes(app: Hono, deps: FirewallDeps) {
     // 6. judge, then sign. A degraded block is still a 200: reason stays "judge_unavailable" and the header marks it.
     // input_hash and issued_at go inside the signed bytes, so a verdict cannot be shown next to another input or passed off as new.
     const { degraded, ...result } = await checkFirewall(req, deps.judge, { timeoutMs: deps.timeoutMs });
-    const stamped = { ...result, input_hash: inputHash(req), issued_at: Math.floor((deps.clock ?? Date.now)()) };
+    const stamped = { ...result, input_hash, issued_at: Math.floor((deps.clock ?? Date.now)()) };
     try {
       return c.json(await signResponse(stamped, deps.signer, deps.sign), 200, degraded ? { "x-firewall-degraded": "1" } : undefined);
     } catch {
