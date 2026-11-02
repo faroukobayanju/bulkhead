@@ -39,6 +39,15 @@ pub struct Tier {
     pub cooldown_s: u64,
     pub rounds_left: u8,
     pub cooldown_until_ns: u64,
+    /// Base tiers only: fixed at configure time, never taken from the agent.
+    pub evm: Option<EvmTier>,
+}
+
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug)]
+pub struct EvmTier {
+    pub chain_id: u64,
+    pub usdc: String,
 }
 
 #[near(serializers = [json, borsh])]
@@ -64,10 +73,23 @@ pub enum ReleasePayload {
 }
 
 #[near(serializers = [json])]
+pub enum SignPayload {
+    Ecdsa(String),
+}
+
+/// Argument of `v1.signer` `sign`, as documented in the near/mpc contract
+/// README. Domain 0 is the secp256k1 key used for Bitcoin and EVM.
+#[near(serializers = [json])]
 pub struct SignRequest {
-    pub payload: Vec<u8>,
+    pub payload_v2: SignPayload,
     pub path: String,
-    pub key_version: u32,
+    pub domain_id: u64,
+}
+
+impl SignRequest {
+    pub fn ecdsa(hash: &[u8], path: String) -> Self {
+        Self { payload_v2: SignPayload::Ecdsa(hex::encode(hash)), path, domain_id: 0 }
+    }
 }
 
 #[near(serializers = [json])]
@@ -86,13 +108,26 @@ pub trait MpcSigner {
 #[ext_contract(ext_self)]
 pub trait SelfCallback {
     fn on_signed(&mut self, tier_id: u8, attempt_id: String) -> Option<SignatureResponse>;
+    fn on_withdraw_signed(&mut self, withdraw_id: String) -> Option<SignatureResponse>;
 }
 
 const SIGN_GAS: Gas = Gas::from_tgas(250);
 const CALLBACK_GAS: Gas = Gas::from_tgas(20);
 // Paid from the vault balance: function-call keys cannot attach deposits (E2).
-// Replace with the signer fee recorded in spike S1.
+// v1.signer requires at least 1 yoctoNEAR and refunds any excess.
 const SIGN_DEPOSIT: NearToken = NearToken::from_yoctonear(1);
+
+/// NEP-297 event. Built with serde so agent-supplied strings cannot break the JSON.
+fn emit(event: &str, data: near_sdk::serde_json::Value) {
+    let e = near_sdk::serde_json::json!({"standard": "bulkhead", "version": "1.0.0", "event": event, "data": data});
+    env::log_str(&format!("EVENT_JSON:{e}"));
+}
+
+/// ULIDs fit easily; the bound keeps storage per attempt small.
+fn validate_attempt_id(id: &str) {
+    let ok = !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    require!(ok, "ERR_BAD_ATTEMPT_ID");
+}
 
 #[near(serializers = [json])]
 pub struct Config {
@@ -115,6 +150,9 @@ pub struct Contract {
     pending_withdraws: IterableMap<u8, (String, u64)>,
     agents: IterableMap<AccountId, String>,
     roots: IterableMap<u32, Vec<(u8, String)>>,
+    /// attempt or withdraw id -> unsigned tx hex, kept after signing so a payout
+    /// can be rebuilt and rebroadcast from contract state alone (E6).
+    pending_tx: IterableMap<String, String>,
     locked: bool,
     paused: bool,
 }
@@ -133,6 +171,7 @@ impl Contract {
             pending_withdraws: IterableMap::new(b"w"),
             agents: IterableMap::new(b"g"),
             roots: IterableMap::new(b"r"),
+            pending_tx: IterableMap::new(b"x"),
             locked: false,
             paused: false,
         }
@@ -158,6 +197,37 @@ impl Contract {
         require!(approved, "ERR_NOT_TIER_AGENT");
     }
 
+    /// `(sighash, unsigned tx)` for the tier's chain. Callers apply the cap.
+    fn build_tx(&self, tier: &Tier, to: &str, payload: &ReleasePayload) -> (Vec<u8>, Vec<u8>) {
+        let built = match (&tier.chain, payload) {
+            (Chain::Bitcoin, ReleasePayload::Bitcoin { utxos, fee_rate_sat_vb }) => {
+                btc::build_payout(utxos, &tier.address, to, *fee_rate_sat_vb)
+            }
+            (Chain::Base, ReleasePayload::Base { nonce, max_fee_per_gas, max_priority_fee_per_gas, gas_limit, usdc_amount }) => {
+                let evm = tier.evm.as_ref().unwrap_or_else(|| env::panic_str("ERR_EVM_CONFIG"));
+                evm::build_usdc_transfer(
+                    evm.chain_id,
+                    *nonce,
+                    max_fee_per_gas.0,
+                    max_priority_fee_per_gas.0,
+                    *gas_limit,
+                    &evm.usdc,
+                    to,
+                    usdc_amount.0,
+                )
+            }
+            _ => env::panic_str("ERR_PAYLOAD_CHAIN"),
+        };
+        built.unwrap_or_else(|e| env::panic_str(e))
+    }
+
+    fn request_signature(&self, path: String, sighash: &[u8]) -> Promise {
+        ext_signer::ext(self.mpc_contract.clone())
+            .with_attached_deposit(SIGN_DEPOSIT)
+            .with_static_gas(SIGN_GAS)
+            .sign(SignRequest::ecdsa(sighash, path))
+    }
+
     /// Dev stand-in for the Shade `register_agent` merged in Task 10. Mainnet
     /// builds omit this feature; `check-mainnet-wasm` verifies that.
     #[cfg(feature = "stub-attestation")]
@@ -172,6 +242,8 @@ impl Contract {
     pub fn release_funds(&mut self, tier_id: u8, attempt_id: String, recipient: String, payload: ReleasePayload) -> Promise {
         require!(!self.paused, "ERR_PAUSED");
         self.assert_approved_agent();
+        validate_attempt_id(&attempt_id);
+        require!(!self.pending_tx.contains_key(&attempt_id), "ERR_DUP_ATTEMPT");
         let mut tier = self.get_tier(tier_id);
         require!(tier.status == TierStatus::Open, "ERR_TIER_NOT_OPEN");
         require!(env::block_timestamp() >= tier.cooldown_until_ns, "ERR_COOLDOWN");
@@ -188,16 +260,16 @@ impl Contract {
             }
             _ => env::panic_str("ERR_PAYLOAD_CHAIN"),
         }
-        // ponytail: replaced by the real Bitcoin/EVM sighash in Task 4. Never deployed like this.
-        let sighash = env::sha256(&near_sdk::borsh::to_vec(&(&recipient, &payload)).unwrap());
+        let (sighash, tx) = self.build_tx(&tier, &recipient, &payload);
         tier.status = TierStatus::Releasing { attempt_id: attempt_id.clone(), since_ns: env::block_timestamp() };
         let path = tier.derivation_path.clone();
         self.tiers.insert(tier_id, tier);
-        env::log_str(&format!("EVENT_JSON:{{\"event\":\"release_requested\",\"tier\":{tier_id},\"attempt_id\":\"{attempt_id}\"}}"));
-        ext_signer::ext(self.mpc_contract.clone())
-            .with_attached_deposit(SIGN_DEPOSIT)
-            .with_static_gas(SIGN_GAS)
-            .sign(SignRequest { payload: sighash, path, key_version: 0 })
+        self.pending_tx.insert(attempt_id.clone(), hex::encode(tx));
+        emit(
+            "release_requested",
+            near_sdk::serde_json::json!({"tier": tier_id, "attempt_id": attempt_id, "payload": hex::encode(&sighash)}),
+        );
+        self.request_signature(path, &sighash)
             .then(ext_self::ext(env::current_account_id()).with_static_gas(CALLBACK_GAS).on_signed(tier_id, attempt_id))
     }
 
@@ -209,7 +281,7 @@ impl Contract {
         #[callback_result] result: Result<SignatureResponse, PromiseError>,
     ) -> Option<SignatureResponse> {
         let mut tier = self.get_tier(tier_id);
-        let (event, sig) = match result {
+        let sig = match result {
             Ok(sig) => {
                 tier.rounds_left = tier.rounds_left.saturating_sub(1);
                 tier.cooldown_until_ns = env::block_timestamp() + tier.cooldown_s * 1_000_000_000;
@@ -218,16 +290,52 @@ impl Contract {
                 } else {
                     TierStatus::Open
                 };
-                ("release_signed", Some(sig))
+                let data = near_sdk::serde_json::json!({
+                    "tier": tier_id,
+                    "attempt_id": attempt_id,
+                    "unsigned_tx_hex": self.pending_tx.get(&attempt_id),
+                    "signature": sig,
+                });
+                emit("release_signed", data);
+                Some(sig)
             }
             Err(_) => {
                 tier.status = TierStatus::Open;
-                ("release_failed", None)
+                self.pending_tx.remove(&attempt_id);
+                emit("release_failed", near_sdk::serde_json::json!({"tier": tier_id, "attempt_id": attempt_id}));
+                None
             }
         };
         self.tiers.insert(tier_id, tier);
-        env::log_str(&format!("EVENT_JSON:{{\"event\":\"{event}\",\"tier\":{tier_id},\"attempt_id\":\"{attempt_id}\"}}"));
         sig
+    }
+
+    #[private]
+    pub fn on_withdraw_signed(
+        &mut self,
+        withdraw_id: String,
+        #[callback_result] result: Result<SignatureResponse, PromiseError>,
+    ) -> Option<SignatureResponse> {
+        match result {
+            Ok(sig) => {
+                let data = near_sdk::serde_json::json!({
+                    "withdraw_id": withdraw_id,
+                    "unsigned_tx_hex": self.pending_tx.get(&withdraw_id),
+                    "signature": sig,
+                });
+                emit("withdraw_signed", data);
+                Some(sig)
+            }
+            Err(_) => {
+                self.pending_tx.remove(&withdraw_id);
+                emit("withdraw_failed", near_sdk::serde_json::json!({"withdraw_id": withdraw_id}));
+                None
+            }
+        }
+    }
+
+    pub fn get_pending_tx(&self, id: String) -> Option<String> {
+        self.pending_tx.get(&id).cloned()
     }
 
     /// Recovery for a tier stuck in `Releasing` (callback out of gas).
@@ -275,6 +383,7 @@ impl Contract {
         self.approved_codehashes.contains(&codehash)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn configure_tier(
         &mut self,
         id: u8,
@@ -284,10 +393,21 @@ impl Contract {
         max_release: U128,
         cooldown_s: u64,
         rounds: u8,
+        evm: Option<EvmTier>,
     ) {
         self.assert_owner();
         require!(!self.locked, "ERR_LOCKED");
         require!(id <= 3, "ERR_BAD_TIER"); // 0 is the private mainnet canary
+        match (&chain, &evm) {
+            // Only P2WPKH makes BIP-143 commit to the input amount, so the cap holds (E14).
+            (Chain::Bitcoin, None) => address::validate_btc_p2wpkh(&address, self.mainnet),
+            (Chain::Base, Some(e)) => {
+                require!(e.chain_id == if self.mainnet { 8453 } else { 84532 }, "ERR_BAD_CHAIN_ID");
+                address::validate_evm(&address).and(address::validate_evm(&e.usdc))
+            }
+            _ => Err("ERR_EVM_CONFIG"),
+        }
+        .unwrap_or_else(|e| env::panic_str(e));
         self.tiers.insert(
             id,
             Tier {
@@ -300,6 +420,7 @@ impl Contract {
                 cooldown_s,
                 rounds_left: rounds,
                 cooldown_until_ns: 0,
+                evm,
             },
         );
     }
@@ -331,7 +452,25 @@ impl Contract {
         self.pending_withdraws.remove(&tier_id);
     }
 
-    /// Signing the withdrawal is wired in Task 4; it starts with this check.
+    /// Moves one UTXO (or one USDC amount) to the proposed address. It ignores
+    /// the cap but needs the 24 h timelock, and the proposal stays valid until
+    /// cancelled so it can be called once per UTXO (E14). Works while paused.
+    pub fn execute_emergency_withdraw(&mut self, tier_id: u8, payload: ReleasePayload) -> Promise {
+        self.assert_owner();
+        let to = self.assert_withdraw_ready(tier_id);
+        let tier = self.get_tier(tier_id);
+        let (sighash, tx) = self.build_tx(&tier, &to, &payload);
+        let withdraw_id = format!("withdraw-{tier_id}-{}", env::block_height());
+        require!(!self.pending_tx.contains_key(&withdraw_id), "ERR_DUP_ATTEMPT");
+        self.pending_tx.insert(withdraw_id.clone(), hex::encode(tx));
+        emit(
+            "withdraw_requested",
+            near_sdk::serde_json::json!({"tier": tier_id, "withdraw_id": withdraw_id, "to": to, "payload": hex::encode(&sighash)}),
+        );
+        self.request_signature(tier.derivation_path, &sighash)
+            .then(ext_self::ext(env::current_account_id()).with_static_gas(CALLBACK_GAS).on_withdraw_signed(withdraw_id))
+    }
+
     fn assert_withdraw_ready(&self, tier_id: u8) -> String {
         let (to, ready) = self
             .pending_withdraws
@@ -398,8 +537,19 @@ mod tests {
         Contract::new("owner.testnet".parse().unwrap(), "v1.signer-prod.testnet".parse().unwrap(), false)
     }
 
+    /// P2WPKH vector from BIP-173; the tier's own address.
+    const TIER_ADDR: &str = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx";
+    const TXID: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const USDC_SEPOLIA: &str = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+    const EVM_TO: &str = "0x52908400098527886E0F7030069857D2E4169EE7";
+
     fn tier(c: &mut Contract, id: u8) {
-        c.configure_tier(id, Chain::Bitcoin, "drainme-tier".into(), "tb1qexample".into(), U128(100_000), 3600, 5);
+        c.configure_tier(id, Chain::Bitcoin, "drainme-tier".into(), TIER_ADDR.into(), U128(100_000), 3600, 5, None);
+    }
+
+    fn base_tier(c: &mut Contract, id: u8) {
+        let evm = EvmTier { chain_id: 84532, usdc: USDC_SEPOLIA.into() };
+        c.configure_tier(id, Chain::Base, "drainme-tier-2".into(), EVM_TO.into(), U128(50_000_000), 3600, 4, Some(evm));
     }
 
     #[test]
@@ -515,11 +665,33 @@ mod tests {
         c
     }
 
+    fn utxo(value: u64) -> Utxo {
+        Utxo { txid: TXID.into(), vout: 0, value_sat: value }
+    }
+
     fn btc(value: u64) -> ReleasePayload {
-        ReleasePayload::Bitcoin {
-            utxos: vec![Utxo { txid: "aa".repeat(32), vout: 0, value_sat: value }],
-            fee_rate_sat_vb: 5,
+        ReleasePayload::Bitcoin { utxos: vec![utxo(value)], fee_rate_sat_vb: 5 }
+    }
+
+    fn base(amount: u128) -> ReleasePayload {
+        ReleasePayload::Base {
+            nonce: 3,
+            max_fee_per_gas: U128(1_000_000_000),
+            max_priority_fee_per_gas: U128(1_000_000),
+            gas_limit: 80_000,
+            usdc_amount: U128(amount),
         }
+    }
+
+    /// The last EVENT_JSON log with this event name, parsed.
+    fn event(name: &str) -> near_sdk::serde_json::Value {
+        near_sdk::test_utils::get_logs()
+            .iter()
+            .rev()
+            .filter_map(|l| l.strip_prefix("EVENT_JSON:"))
+            .map(|j| near_sdk::serde_json::from_str::<near_sdk::serde_json::Value>(j).unwrap())
+            .find(|v| v["event"] == name)
+            .unwrap_or_else(|| panic!("no {name} event"))
     }
 
     fn signed(c: &mut Contract, ts: u64, ok: bool) -> Option<SignatureResponse> {
@@ -658,7 +830,7 @@ mod tests {
     #[test]
     fn last_round_drains() {
         let mut c = setup();
-        c.configure_tier(1, Chain::Bitcoin, "p".into(), "tb1qexample".into(), U128(100_000), 3600, 1);
+        c.configure_tier(1, Chain::Bitcoin, "p".into(), TIER_ADDR.into(), U128(100_000), 3600, 1, None);
         c.register_agent_stub(AGENT.parse().unwrap(), "abc".into());
         ctx(AGENT, 1_000);
         let _ = c.release_funds(1, "a1".into(), BTC_TO.into(), btc(50_000));
@@ -716,5 +888,183 @@ mod tests {
         let mut c = ready();
         ctx("mallory.testnet", 1_000);
         c.log_attempt_roots(20_000, vec![(1, "r1".into())]);
+    }
+
+    // ---- payout transactions (Task 4) ----
+
+    #[test]
+    fn sign_request_matches_mpc_wire_format() {
+        // Shape from the v1.signer README: payload_v2 tagged Ecdsa, hex, domain 0 = secp256k1.
+        let r = SignRequest::ecdsa(&[0x52; 32], "drainme-tier-1".into());
+        let want = near_sdk::serde_json::json!({
+            "payload_v2": {"Ecdsa": "52".repeat(32)},
+            "path": "drainme-tier-1",
+            "domain_id": 0
+        });
+        assert_eq!(near_sdk::serde_json::to_value(&r).unwrap(), want);
+    }
+
+    #[test]
+    fn release_stores_the_real_bitcoin_payout() {
+        let mut c = ready();
+        let _ = c.release_funds(1, "a1".into(), BTC_TO.into(), btc(50_000));
+        let (_, tx) = btc::build_payout(&[utxo(50_000)], TIER_ADDR, BTC_TO, 5).unwrap();
+        assert_eq!(c.get_pending_tx("a1".into()), Some(hex::encode(tx)));
+    }
+
+    #[test]
+    fn release_signs_the_bitcoin_sighash() {
+        let mut c = ready();
+        let _ = c.release_funds(1, "a1".into(), BTC_TO.into(), btc(50_000));
+        let (sighash, _) = btc::build_payout(&[utxo(50_000)], TIER_ADDR, BTC_TO, 5).unwrap();
+        assert_eq!(event("release_requested")["data"]["payload"], hex::encode(sighash));
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_FEE_TOO_HIGH")]
+    fn builder_error_rejects_release() {
+        let mut c = ready();
+        let p = ReleasePayload::Bitcoin { utxos: vec![utxo(50_000)], fee_rate_sat_vb: 201 };
+        let _ = c.release_funds(1, "a1".into(), BTC_TO.into(), p);
+    }
+
+    #[test]
+    fn release_signed_event_carries_unsigned_tx_and_signature() {
+        let mut c = ready();
+        let _ = c.release_funds(1, "a1".into(), BTC_TO.into(), btc(50_000));
+        let hex_tx = c.get_pending_tx("a1".into()).unwrap();
+        signed(&mut c, 2_000, true);
+        let e = event("release_signed");
+        assert_eq!(e["standard"], "bulkhead");
+        assert_eq!(e["data"]["attempt_id"], "a1");
+        assert_eq!(e["data"]["unsigned_tx_hex"], hex_tx);
+        assert_eq!(e["data"]["signature"]["recovery_id"], 0);
+    }
+
+    #[test]
+    fn signer_failure_clears_pending_tx() {
+        let mut c = ready();
+        let _ = c.release_funds(1, "a1".into(), BTC_TO.into(), btc(50_000));
+        signed(&mut c, 2_000, false);
+        assert_eq!(c.get_pending_tx("a1".into()), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_DUP_ATTEMPT")]
+    fn signed_attempt_id_cannot_be_reused() {
+        let mut c = ready();
+        let _ = c.release_funds(1, "a1".into(), BTC_TO.into(), btc(50_000));
+        signed(&mut c, 2_000, true);
+        ctx(AGENT, 2_000 + 3600 * 1_000_000_000);
+        let _ = c.release_funds(1, "a1".into(), BTC_TO.into(), btc(50_000));
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_BAD_ATTEMPT_ID")]
+    fn attempt_id_cannot_inject_event_json() {
+        let mut c = ready();
+        let _ = c.release_funds(1, "a1\",\"event\":\"drained".into(), BTC_TO.into(), btc(50_000));
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_TIER_NOT_P2WPKH")]
+    fn bitcoin_tier_address_must_be_p2wpkh() {
+        let mut c = setup();
+        let p2wsh = "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7";
+        c.configure_tier(1, Chain::Bitcoin, "p".into(), p2wsh.into(), U128(1), 1, 1, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_BAD_BTC_ADDR")]
+    fn bitcoin_tier_address_must_match_network() {
+        let mut c = setup();
+        c.configure_tier(1, Chain::Bitcoin, "p".into(), "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq".into(), U128(1), 1, 1, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_EVM_CONFIG")]
+    fn base_tier_needs_evm_config() {
+        let mut c = setup();
+        c.configure_tier(2, Chain::Base, "p".into(), EVM_TO.into(), U128(1), 1, 1, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_BAD_CHAIN_ID")]
+    fn base_mainnet_chain_id_rejected_on_testnet_vault() {
+        let mut c = setup();
+        let evm = EvmTier { chain_id: 8453, usdc: USDC_SEPOLIA.into() };
+        c.configure_tier(2, Chain::Base, "p".into(), EVM_TO.into(), U128(1), 1, 1, Some(evm));
+    }
+
+    #[test]
+    fn release_stores_the_real_base_usdc_transfer() {
+        let mut c = setup();
+        base_tier(&mut c, 2);
+        c.register_agent_stub(AGENT.parse().unwrap(), "abc".into());
+        ctx(AGENT, 1_000);
+        let _ = c.release_funds(2, "b1".into(), EVM_TO.into(), base(20_000_000));
+        let (sighash, tx) =
+            evm::build_usdc_transfer(84532, 3, 1_000_000_000, 1_000_000, 80_000, USDC_SEPOLIA, EVM_TO, 20_000_000).unwrap();
+        assert_eq!(c.get_pending_tx("b1".into()), Some(hex::encode(tx)));
+        assert_eq!(event("release_requested")["data"]["payload"], hex::encode(sighash));
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_OVER_CAP")]
+    fn base_over_cap_rejected() {
+        let mut c = setup();
+        base_tier(&mut c, 2);
+        c.register_agent_stub(AGENT.parse().unwrap(), "abc".into());
+        ctx(AGENT, 1_000);
+        let _ = c.release_funds(2, "b1".into(), EVM_TO.into(), base(50_000_001));
+    }
+
+    // ---- emergency withdraw (Task 4, E14) ----
+
+    const WITHDRAW_TO: &str = "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7";
+
+    fn withdraw_ready() -> Contract {
+        let mut c = setup();
+        tier(&mut c, 1);
+        c.propose_emergency_withdraw(1, WITHDRAW_TO.into());
+        ctx("owner.testnet", DAY_NS);
+        c
+    }
+
+    #[test]
+    fn emergency_withdraw_signs_one_utxo_ignoring_cap() {
+        let mut c = withdraw_ready();
+        // Above max_release (100_000): the cap binds the agent, not the timelocked owner.
+        let _ = c.execute_emergency_withdraw(1, btc(5_000_000));
+        let id = event("withdraw_requested")["data"]["withdraw_id"].as_str().unwrap().to_string();
+        let (sighash, tx) = btc::build_payout(&[utxo(5_000_000)], TIER_ADDR, WITHDRAW_TO, 5).unwrap();
+        assert_eq!(c.get_pending_tx(id), Some(hex::encode(tx)));
+        assert_eq!(event("withdraw_requested")["data"]["payload"], hex::encode(sighash));
+    }
+
+    #[test]
+    fn emergency_withdraw_proposal_stays_for_the_next_utxo() {
+        let mut c = withdraw_ready();
+        let _ = c.execute_emergency_withdraw(1, btc(5_000_000));
+        assert_eq!(c.pending_owner_actions().len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_TIMELOCK")]
+    fn emergency_withdraw_execute_before_24h_panics() {
+        let mut c = setup();
+        tier(&mut c, 1);
+        c.propose_emergency_withdraw(1, WITHDRAW_TO.into());
+        ctx("owner.testnet", DAY_NS - 1);
+        let _ = c.execute_emergency_withdraw(1, btc(5_000_000));
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_NOT_OWNER")]
+    fn agent_cannot_execute_emergency_withdraw() {
+        let mut c = withdraw_ready();
+        c.register_agent_stub(AGENT.parse().unwrap(), "abc".into());
+        ctx(AGENT, DAY_NS);
+        let _ = c.execute_emergency_withdraw(1, btc(5_000_000));
     }
 }

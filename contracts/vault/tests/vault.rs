@@ -8,10 +8,15 @@ const AGENT_GAS: Gas = Gas::from_tgas(300);
 const VAULT: &str = "../target/near/bulkhead_vault/bulkhead_vault.wasm";
 const SIGNER: &str = "../target/near/mock_signer/mock_signer.wasm";
 const BTC_TO: &str = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx";
+const TXID: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
 fn release(attempt: &str, value: u64) -> serde_json::Value {
     json!({"tier_id":1,"attempt_id":attempt,"recipient":BTC_TO,
-           "payload":{"Bitcoin":{"utxos":[{"txid":"aa","vout":0,"value_sat":value}],"fee_rate_sat_vb":5}}})
+           "payload":{"Bitcoin":{"utxos":[{"txid":TXID,"vout":0,"value_sat":value}],"fee_rate_sat_vb":5}}})
+}
+
+fn utxo(value: u64) -> bulkhead_vault::Utxo {
+    bulkhead_vault::Utxo { txid: TXID.into(), vout: 0, value_sat: value }
 }
 
 /// Returns (worker, vault, signer, agent). The agent holds only a function-call
@@ -88,6 +93,34 @@ async fn signer_failure_reopens_tier_and_keeps_round() -> anyhow::Result<()> {
     let tier: serde_json::Value = vault.view("get_tier").args_json(json!({"id":1})).await?.json()?;
     assert_eq!(tier["status"], "Open");
     assert_eq!(tier["rounds_left"], 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn signer_gets_mpc_shaped_request_with_the_bitcoin_sighash() -> anyhow::Result<()> {
+    let (_w, vault, signer, agent) = setup().await?;
+    let r = agent.call(vault.id(),"release_funds").args_json(release("a1",50_000)).gas(AGENT_GAS).transact().await?;
+    assert!(r.is_success(), "{:?}", r.failures());
+    let last: Option<String> = signer.view("last_request").await?.json()?;
+    let req: serde_json::Value = serde_json::from_str(&last.expect("signer saw no request"))?;
+    let (sighash, _) = bulkhead_vault::btc::build_payout(&[utxo(50_000)], BTC_TO, BTC_TO, 5).unwrap();
+    assert_eq!(req, json!({"payload_v2":{"Ecdsa":hex::encode(sighash)},"path":"drainme-tier-1","domain_id":0}));
+    Ok(())
+}
+
+#[tokio::test]
+async fn release_and_callback_fit_in_agent_gas() -> anyhow::Result<()> {
+    let (_w, vault, _s, agent) = setup().await?;
+    let r = agent.call(vault.id(),"release_funds").args_json(release("a1",50_000)).gas(AGENT_GAS).transact().await?;
+    assert!(r.is_success(), "{:?}", r.failures());
+    assert!(r.receipt_failures().is_empty(), "{:?}", r.receipt_failures());
+    let burnt = r.total_gas_burnt.as_gas();
+    assert!(burnt < Gas::from_tgas(290).as_gas(), "burnt {} TGas", burnt / 1_000_000_000_000);
+    let signed = r.logs().into_iter().find(|l| l.contains("\"release_signed\"")).expect("no release_signed event");
+    let e: serde_json::Value = serde_json::from_str(signed.strip_prefix("EVENT_JSON:").unwrap())?;
+    let pending: Option<String> = vault.view("get_pending_tx").args_json(json!({"id":"a1"})).await?.json()?;
+    assert_eq!(e["data"]["unsigned_tx_hex"], json!(pending.expect("pending tx kept")));
+    assert!(e["data"]["signature"]["big_r"]["affine_point"].is_string(), "{e}");
     Ok(())
 }
 
