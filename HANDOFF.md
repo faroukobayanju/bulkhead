@@ -26,8 +26,9 @@ Building is allowed now (HACKATHON.md Q-001: eligible work starts 2026-10-19).
   - The signer request uses the `v1.signer` format from the near/mpc README: `{request: {payload_v2: {"Ecdsa": hex}, path, domain_id: 0}}`, 1 yoctoNEAR deposit. The sandbox mock signer rejects any other shape.
   - Events follow NEP-297: `{"standard":"bulkhead","version":"1.0.0","event":…,"data":{…}}`. `attempt_id` must be 1–64 chars of `[A-Za-z0-9_-]` and is never reused.
   - `configure_tier` takes an 8th argument, `evm: Option<EvmTier { chain_id, usdc }>`, required for Base tiers (chain 84532 on testnet, 8453 on mainnet). Bitcoin tier addresses must be P2WPKH on the vault's network.
-- **Do not deploy to mainnet:** no testnet proof yet (spike S1).
-- **Next:** spike S1 (testnet Bitcoin payout signed by the contract, plus the false-amount rejection), rename to `bulkhead` and `scripts/deploy-vault.ts` (E24), then S3, then Task 10. Agents attach 300 TGas, never max gas (E14b).
+- **Spike S1 done on testnet (2026-11-02), see `docs/spikes.md`:** the vault signed Bitcoin testnet4 payout `a8ecea7c…8b1a` through `v1.signer-prod.testnet`, and Bitcoin rejected the same payout signed with a false input amount. How the agent assembles and broadcasts the tx is written up there, with reference code in `scripts/spike-s1/`.
+- **Do not deploy to mainnet:** the contract has had no review yet.
+- **Next:** rename to `bulkhead` and `scripts/deploy-vault.ts` (E24), then S3, then Task 10. Agents attach 300 TGas, never max gas (E14b).
 - **Choices already made:** Rust pinned to 1.96 because near-sdk 5.30 needs a newer compiler. `ReleasePayload` was added in Task 3, ahead of Task 4.
 
 ## Interface freeze (end of day 2), owned jointly
