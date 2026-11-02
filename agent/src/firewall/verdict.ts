@@ -11,6 +11,7 @@ export type Judge = (
   input: { messages: Msg[]; proposed_action?: Action; normalized: ReturnType<typeof normalize> },
   signal: AbortSignal,
 ) => Promise<JudgeOut>;
+export const DEGRADED_REASON = "judge_unavailable";
 export type Sign = (hash: Uint8Array) => Uint8Array | Promise<Uint8Array>;
 
 // Phrased so a NaN risk lands on "block".
@@ -23,6 +24,8 @@ export function judgeOut(x: unknown): JudgeOut {
   if (typeof risk !== "number" || !Number.isInteger(risk) || risk < 0 || risk > 100) throw new Error("judge risk must be an integer 0-100");
   if (!TECHNIQUES.includes(technique as Technique)) throw new Error("judge technique is not in the enum");
   if (typeof reason !== "string") throw new Error("judge reason must be a string");
+  // What a degraded block says. A judged verdict must not be able to read like one.
+  if (reason.trim().toLowerCase() === DEGRADED_REASON) throw new Error("judge reason is the reserved degraded-block text");
   return { risk, technique: technique as Technique, reason: [...reason].slice(0, 280).join("") };
 }
 
@@ -36,6 +39,11 @@ export function canonicalJson(v: unknown): string {
   }
   return JSON.stringify(v);
 }
+
+// The input a verdict is about: sha256 hex of the canonical JSON of the validated request ({messages, proposed_action}, unknown
+// fields already dropped, proposed_action left out when absent). A caller recomputes it from what it sent.
+export const inputHash = (req: { messages: Msg[]; proposed_action?: Action }) =>
+  createHash("sha256").update(canonicalJson({ messages: req.messages, proposed_action: req.proposed_action })).digest("hex");
 
 // ed25519 over sha256(canonical_json(response without signature)), base64. `signer` is part of the signed bytes.
 export async function signResponse<T extends Record<string, unknown>>(body: T, signer: string, sign: Sign) {

@@ -151,6 +151,13 @@ describe("judgeOut", () => {
   test("clips the reason to 280 characters", () => {
     expect(judgeOut({ ...ok, reason: "x".repeat(500) }).reason.length).toBe(280);
   });
+  // "judge_unavailable" is what a degraded block says. A judged verdict must never be able to read like one.
+  test.each(["judge_unavailable", "JUDGE_UNAVAILABLE", " judge_unavailable ", "Judge_Unavailable\n"])("rejects the reserved reason %j", reason => {
+    expect(() => judgeOut({ ...ok, reason })).toThrow("reserved");
+  });
+  test("a reason that merely mentions it is fine", () => {
+    expect(judgeOut({ ...ok, reason: "the judge_unavailable text is quoted from the input" }).reason).toContain("judge_unavailable");
+  });
   test.each([0, 100])("risk %p is the edge of the range", risk => {
     expect(judgeOut({ ...ok, risk }).risk).toBe(risk);
   });

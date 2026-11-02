@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { Hono } from "hono";
+import { createHash } from "node:crypto";
 import { KeyPair } from "near-api-js";
 import { memoryCounter, utcDay, type Counter } from "../src/counter";
 import { firewallRoutes } from "../src/firewall/api";
 import { makeBudget } from "../src/firewall/budget";
 import { SlidingWindow } from "../src/firewall/window";
-import type { Judge } from "../src/firewall/verdict";
+import { canonicalJson, type Judge } from "../src/firewall/verdict";
 
 const SECRET = "proxy-secret-0123456789";
 const KEY_A = "dm_live_key_A_secret";
@@ -76,7 +77,7 @@ describe("auth", () => {
     expect(r.status).toBe(200);
     expect(r.headers.get("x-firewall-degraded")).toBeNull();
     const body = (await r.json()) as Record<string, unknown>;
-    expect(Object.keys(body).sort()).toEqual(["codehash", "firewall_version", "latency_ms", "reason", "risk", "signature", "signer", "technique", "verdict"]);
+    expect(Object.keys(body).sort()).toEqual(["codehash", "firewall_version", "input_hash", "issued_at", "latency_ms", "reason", "risk", "signature", "signer", "technique", "verdict"]);
     expect(body).toMatchObject({ verdict: "allow", risk: 5, technique: "none", reason: "looks fine", signer: "agent.near" });
   });
 
@@ -93,6 +94,69 @@ describe("auth", () => {
     const s = setup({ keys: async k => (asked.push(k), true) });
     await s.withKey(MSG, "abc123");
     expect(asked).toEqual(["abc123"]);
+  });
+});
+
+describe("what the signature binds", () => {
+  const hashOf = (x: object) => createHash("sha256").update(canonicalJson(x)).digest("hex");
+  const sent = { messages: [{ role: "user", content: "hello dragon" }], proposed_action: { tool: "release_funds", args: { recipient: "bc1q", n: 1 } } };
+
+  test("input_hash is the sha256 hex of the canonical JSON of the validated messages and proposed_action", async () => {
+    const s = setup();
+    const body = (await (await s.withKey(sent)).json()) as any;
+    expect(body.input_hash).toBe(hashOf(sent));
+    expect(body.input_hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test("with no proposed_action the key is left out of the hashed object", async () => {
+    const s = setup();
+    const body = (await (await s.withKey(MSG)).json()) as any;
+    expect(body.input_hash).toBe(hashOf({ messages: MSG.messages }));
+    expect(body.input_hash).not.toBe(hashOf({ messages: MSG.messages, proposed_action: null }));
+  });
+
+  test("unknown fields are dropped before hashing, so a caller can recompute the hash from what it meant to send", async () => {
+    const s = setup();
+    const noisy = { extra: 1, messages: [{ role: "user", content: "hello dragon", name: "x" }], proposed_action: { tool: "release_funds", args: { n: 1, recipient: "bc1q" }, memo: "dropped" } };
+    expect(((await (await s.withKey(noisy)).json()) as any).input_hash).toBe(hashOf(sent));
+  });
+
+  test("another message, role, order or action gives another hash", async () => {
+    const s = setup();
+    const hashes = new Set<string>();
+    for (const body of [
+      sent,
+      { ...sent, messages: [{ role: "user", content: "hello dragon!" }] },
+      { ...sent, messages: [{ role: "system", content: "hello dragon" }] },
+      { ...sent, messages: [...sent.messages, ...sent.messages] },
+      { ...sent, proposed_action: { tool: "release_funds", args: { recipient: "bc1q", n: 2 } } },
+      { ...sent, proposed_action: { tool: "other", args: { recipient: "bc1q", n: 1 } } },
+      { messages: sent.messages },
+    ]) hashes.add(((await (await s.withKey(body)).json()) as any).input_hash);
+    expect(hashes.size).toBe(7);
+  });
+
+  test("issued_at is an integer in ms from the injected clock", async () => {
+    const s = setup();
+    expect(((await (await s.withKey()).json()) as any).issued_at).toBe(T0);
+    s.clock.now = 1_760_000_000_123.9;
+    const body = (await (await s.withKey()).json()) as any;
+    expect(body.issued_at).toBe(1_760_000_000_123);
+    expect(Number.isInteger(body.issued_at)).toBe(true);
+  });
+
+  test("input_hash and issued_at are inside the signed bytes, for a degraded block too", async () => {
+    for (const judge of [undefined, async () => { throw new Error("down"); }]) {
+      const s = setup({ judge });
+      const body = (await (await s.withKey(sent)).json()) as Record<string, unknown>;
+      const check = (res: Record<string, unknown>) => {
+        const { signature, ...rest } = res;
+        return kp.getPublicKey().verify(createHash("sha256").update(canonicalJson(rest)).digest(), Buffer.from(signature as string, "base64"));
+      };
+      expect(check(body)).toBe(true);
+      expect(check({ ...body, input_hash: hashOf(MSG) })).toBe(false);
+      expect(check({ ...body, issued_at: (body.issued_at as number) + 1 })).toBe(false);
+    }
   });
 });
 
@@ -143,6 +207,46 @@ describe("playground", () => {
     expect((await s.playground(MSG, "203.0.113.8")).status).toBe(200);
     s.clock.now += 60_001;
     expect((await s.playground()).status).toBe(200);
+  });
+
+  describe("the window is per address for IPv4 and per /64 for IPv6", () => {
+    const fill = async (s: ReturnType<typeof setup>, ips: string[]) => {
+      for (const ip of ips) expect((await s.playground(MSG, ip)).status).toBe(200);
+    };
+    test("addresses in one /64 share the 5 per minute, however they are spelled", async () => {
+      const s = setup();
+      await fill(s, ["2001:db8:1:2::1", "2001:db8:1:2::2", "2001:DB8:1:2:0:0:0:3", "2001:db8:1:2:aaaa:bbbb:cccc:dddd", "2001:db8:1:2:ffff:ffff:ffff:ffff"]);
+      for (const ip of ["2001:db8:1:2::9", "2001:db8:1:2:1:2:3:4", "2001:0db8:0001:0002:0000:0000:0000:0001"]) {
+        const r = await s.playground(MSG, ip);
+        expect(r.status).toBe(429);
+        expect(Number(r.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+      }
+    });
+    test("another /64 has its own window", async () => {
+      const s = setup();
+      await fill(s, Array.from({ length: 5 }, (_, i) => `2001:db8:1:2::${i + 1}`));
+      expect((await s.playground(MSG, "2001:db8:1:3::1")).status).toBe(200);
+      expect((await s.playground(MSG, "2001:db8:2:2::1")).status).toBe(200);
+    });
+    test("IPv4 stays per address, and an IPv4-mapped IPv6 address is that IPv4 address", async () => {
+      const s = setup();
+      await fill(s, Array.from({ length: 5 }, () => "203.0.113.7"));
+      expect((await s.playground(MSG, "203.0.113.7")).status).toBe(429);
+      expect((await s.playground(MSG, "::ffff:203.0.113.7")).status).toBe(429);
+      expect((await s.playground(MSG, "203.0.113.8")).status).toBe(200);
+      expect((await s.playground(MSG, "203.0.114.7")).status).toBe(200);
+    });
+    test("rotating the low 64 bits does not get past the window", async () => {
+      const s = setup();
+      let ok = 0;
+      for (let i = 0; i < 40; i++) if ((await s.playground(MSG, `2001:db8:9:9:${i.toString(16)}::${i + 1}`)).status === 200) ok++;
+      expect(ok).toBe(5);
+    });
+    test("an address with a zone id does not crash and keys with its /64", async () => {
+      const s = setup();
+      const r = await s.playground(MSG, "fe80::1%eth0");
+      expect([200, 400]).toContain(r.status);
+    });
   });
 
   test("an API key from the same proxy is treated as an API key, not a playground call", async () => {

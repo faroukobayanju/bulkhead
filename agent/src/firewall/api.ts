@@ -5,8 +5,8 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { normalize } from "../normalize";
 import type { Budget } from "./budget";
 import { heuristicScore } from "./heuristics";
-import { judgeOut, signResponse, toVerdict, type Action, type Judge, type Msg, type Sign, type Technique } from "./verdict";
-import type { SlidingWindow } from "./window";
+import { DEGRADED_REASON, inputHash, judgeOut, signResponse, toVerdict, type Action, type Judge, type Msg, type Sign, type Technique } from "./verdict";
+import { ipKey, type SlidingWindow } from "./window";
 
 export type { Judge };
 export const FIREWALL_VERSION = process.env.FIREWALL_VERSION ?? "fw-v1";
@@ -56,7 +56,7 @@ export async function checkFirewall(req: CheckReq, judge: Judge, opts: { timeout
       degraded: false,
     });
   } catch {
-    return done({ verdict: "block", risk: 100, technique: "other", reason: "judge_unavailable", degraded: true });
+    return done({ verdict: "block", risk: 100, technique: "other", reason: DEGRADED_REASON, degraded: true });
   } finally {
     clearTimeout(timer);
   }
@@ -114,8 +114,7 @@ export type FirewallDeps = {
   timeoutMs?: number;
 };
 
-// ponytail: x-real-ip is keyed per address, so an IPv6 client can rotate addresses past the 5/min window; the 300/day
-// playground pool still bounds the cost. Nothing is logged here: Task 9's error handler decides what to record.
+// Nothing is logged here: Task 9's error handler decides what to record.
 export function firewallRoutes(app: Hono, deps: FirewallDeps) {
   const fail = (c: Context, status: ContentfulStatusCode, code: string, message: string, fix: string, headers?: Record<string, string>) =>
     c.json({ error: { code, message, fix } }, status, headers);
@@ -143,7 +142,7 @@ export function firewallRoutes(app: Hono, deps: FirewallDeps) {
         return fail(c, 401, "missing_api_key", "No API key.", "Send your key in the x-api-key header.");
       const ip = c.req.header("x-real-ip");
       if (!ip || !isIP(ip)) return fail(c, 400, "bad_client_ip", "The proxy did not send a valid x-real-ip.", "The web proxy must set x-real-ip to the client address.");
-      [id, perMinute] = [`ip:${ip.toLowerCase()}`, 5];
+      [id, perMinute] = [`ip:${ipKey(ip)}`, 5];
     }
 
     // 2. per-minute limit
@@ -174,9 +173,11 @@ export function firewallRoutes(app: Hono, deps: FirewallDeps) {
     if (!ok) return fail(c, 503, "budget_exhausted", "The daily check budget is used up.", "It resets at 00:00 UTC. Retry then.");
 
     // 6. judge, then sign. A degraded block is still a 200: reason stays "judge_unavailable" and the header marks it.
+    // input_hash and issued_at go inside the signed bytes, so a verdict cannot be shown next to another input or passed off as new.
     const { degraded, ...result } = await checkFirewall(req, deps.judge, { timeoutMs: deps.timeoutMs });
+    const stamped = { ...result, input_hash: inputHash(req), issued_at: Math.floor((deps.clock ?? Date.now)()) };
     try {
-      return c.json(await signResponse(result, deps.signer, deps.sign), 200, degraded ? { "x-firewall-degraded": "1" } : undefined);
+      return c.json(await signResponse(stamped, deps.signer, deps.sign), 200, degraded ? { "x-firewall-degraded": "1" } : undefined);
     } catch {
       return fail(c, 503, "signing_unavailable", "The verdict could not be signed.", "Retry in a moment.");
     }

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { memoryCounter, utcDay } from "../src/counter";
 import { LIMITS, makeBudget } from "../src/firewall/budget";
-import { SlidingWindow } from "../src/firewall/window";
+import { ipKey, SlidingWindow } from "../src/firewall/window";
 
 describe("memoryCounter", () => {
   test("adds, reads and starts at zero", async () => {
@@ -139,5 +139,34 @@ describe("SlidingWindow", () => {
     expect(w.size).toBe(1000);
     w.hit("later", 5, 200_000);
     expect(w.size).toBe(1);
+  });
+});
+
+describe("ipKey", () => {
+  test("IPv4 is kept as is", () => {
+    expect(ipKey("203.0.113.7")).toBe("203.0.113.7");
+  });
+  test("IPv6 keys by the first 64 bits, whatever the spelling", () => {
+    const k = ipKey("2001:db8:1:2::1");
+    expect(k).toBe("2001:0db8:0001:0002::/64");
+    for (const same of ["2001:DB8:1:2::ffff", "2001:db8:1:2:0:0:0:1", "2001:0db8:0001:0002:aaaa:bbbb:cccc:dddd", "2001:db8:1:2::"]) expect(ipKey(same)).toBe(k);
+    for (const other of ["2001:db8:1:3::1", "2001:db8:2:2::1", "2002:db8:1:2::1", "3001:db8:1:2::1"]) expect(ipKey(other)).not.toBe(k);
+  });
+  test("compressed forms that cross the 64-bit line", () => {
+    expect(ipKey("::1")).toBe("0000:0000:0000:0000::/64");
+    expect(ipKey("::")).toBe("0000:0000:0000:0000::/64");
+    expect(ipKey("1::")).toBe("0001:0000:0000:0000::/64");
+    expect(ipKey("1:2:3:4:5:6:7:8")).toBe("0001:0002:0003:0004::/64");
+    expect(ipKey("1:2::8")).toBe("0001:0002:0000:0000::/64");
+    expect(ipKey("a:b:c::d:e")).toBe("000a:000b:000c:0000::/64");
+  });
+  test("an IPv4-mapped address is the IPv4 address, in any spelling", () => {
+    expect(ipKey("::ffff:203.0.113.7")).toBe("203.0.113.7");
+    expect(ipKey("::FFFF:cb00:7107")).toBe("203.0.113.7");
+    expect(ipKey("0:0:0:0:0:ffff:cb00:7107")).toBe("203.0.113.7");
+  });
+  test("an IPv6 address with an embedded IPv4 tail is read, and a zone id is dropped", () => {
+    expect(ipKey("64:ff9b::192.0.2.33")).toBe("0064:ff9b:0000:0000::/64");
+    expect(ipKey("fe80::1%eth0")).toBe("fe80:0000:0000:0000::/64");
   });
 });
