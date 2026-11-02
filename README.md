@@ -1,4 +1,4 @@
-# Bulkhead
+<img src="assets/brand/wordmark.svg" alt="Bulkhead" width="320">
 
 When your AI agent gets tricked, only one compartment floods. Bulkhead is a firewall and contract-enforced spending cap for agents that hold money, proven in **Drain Me**, its live arena. Built for NEAR HACKATHON (Nov 1–14, 2026).
 
