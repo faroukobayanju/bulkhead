@@ -51,6 +51,7 @@ export function makeJudge(o: { client: NearAI; system?: string; model?: string; 
       model: o.model ?? JUDGE_MODEL,
       temperature: 0,
       max_tokens: MAX_TOKENS,
+      reasoning_effort: "none", // default reasoning ran past the 3.5 s timeout on 3 of 10 benign messages (docs/spikes.md)
       timeoutMs: o.timeoutMs ?? 3500,
       response_format: { type: "json_object" },
       signal,

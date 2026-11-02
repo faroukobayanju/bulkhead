@@ -17,7 +17,7 @@ const fakeClient = (content: string | null = JSON.stringify(GOOD), finish_reason
   const client: NearAI = {
     async chat(r) {
       calls.push(r);
-      return { content, finish_reason, usage: null, message: {}, costMicro: 0 } satisfies ChatResult;
+      return { content, finish_reason, usage: null, message: {} } satisfies ChatResult;
     },
   };
   return { client, calls };
@@ -34,7 +34,7 @@ describe("makeJudge request", () => {
     const [r] = calls;
     expect(JUDGE_MODEL).toBe("Qwen/Qwen3.8-27B");
     expect(agentConfig.judge_model).toBe(JUDGE_MODEL);
-    expect(r).toMatchObject({ model: JUDGE_MODEL, temperature: 0, max_tokens: 400, response_format: { type: "json_object" } });
+    expect(r).toMatchObject({ model: JUDGE_MODEL, temperature: 0, max_tokens: 400, reasoning_effort: "none", response_format: { type: "json_object" } });
     expect(r!.timeoutMs).toBeGreaterThan(0);
   });
 
@@ -86,6 +86,8 @@ describe("makeJudge request", () => {
     const out = await makeJudge({ client: ai })({ messages, proposed_action, normalized: normalize("hi") }, new AbortController().signal);
     expect(out).toEqual(GOOD);
     expect(sent.model).toBe("Qwen/Qwen3.8-27B");
+    // the outgoing body: thinking off, or the judge passes its 3.5 s timeout on some benign messages (docs/spikes.md)
+    expect(sent).toMatchObject({ reasoning_effort: "none", temperature: 0, max_tokens: 400, response_format: { type: "json_object" } });
     expect(sent.messages[0].content).toBe(loadJudgePrompt());
   });
 });
