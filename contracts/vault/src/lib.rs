@@ -116,6 +116,7 @@ const CALLBACK_GAS: Gas = Gas::from_tgas(20);
 // Paid from the vault balance: function-call keys cannot attach deposits (E2).
 // v1.signer requires at least 1 yoctoNEAR and refunds any excess.
 const SIGN_DEPOSIT: NearToken = NearToken::from_yoctonear(1);
+const MAX_COOLDOWN_S: u64 = 30 * 24 * 60 * 60;
 
 /// NEP-297 event. Built with serde so agent-supplied strings cannot break the JSON.
 fn emit(event: &str, data: near_sdk::serde_json::Value) {
@@ -398,6 +399,13 @@ impl Contract {
         self.assert_owner();
         require!(!self.locked, "ERR_LOCKED");
         require!(id <= 3, "ERR_BAD_TIER"); // 0 is the private mainnet canary
+        require!(rounds >= 1, "ERR_BAD_ROUNDS");
+        // Keeps cooldown_s * 1e9 far from u64 overflow in on_signed.
+        require!(cooldown_s <= MAX_COOLDOWN_S, "ERR_BAD_COOLDOWN");
+        if let Some(t) = self.tiers.get(&id) {
+            // A reconfigure must not reopen a tier whose signature is in flight.
+            require!(!matches!(t.status, TierStatus::Releasing { .. }), "ERR_TIER_NOT_OPEN");
+        }
         match (&chain, &evm) {
             // Only P2WPKH makes BIP-143 commit to the input amount, so the cap holds (E14).
             (Chain::Bitcoin, None) => address::validate_btc_p2wpkh(&address, self.mainnet),
@@ -460,7 +468,8 @@ impl Contract {
         let to = self.assert_withdraw_ready(tier_id);
         let tier = self.get_tier(tier_id);
         let (sighash, tx) = self.build_tx(&tier, &to, &payload);
-        let withdraw_id = format!("withdraw-{tier_id}-{}", env::block_height());
+        // ':' is not allowed in an attempt_id, so an agent cannot pre-empt this id.
+        let withdraw_id = format!("withdraw:{tier_id}:{}", env::block_height());
         require!(!self.pending_tx.contains_key(&withdraw_id), "ERR_DUP_ATTEMPT");
         self.pending_tx.insert(withdraw_id.clone(), hex::encode(tx));
         emit(
@@ -1057,6 +1066,68 @@ mod tests {
         c.propose_emergency_withdraw(1, WITHDRAW_TO.into());
         ctx("owner.testnet", DAY_NS - 1);
         let _ = c.execute_emergency_withdraw(1, btc(5_000_000));
+    }
+
+    #[test]
+    fn withdraw_id_is_never_a_valid_attempt_id() {
+        let mut c = withdraw_ready();
+        let _ = c.execute_emergency_withdraw(1, btc(5_000_000));
+        let id = event("withdraw_requested")["data"]["withdraw_id"].as_str().unwrap().to_string();
+        assert_eq!(id, "withdraw:1:0");
+    }
+
+    fn withdraw_signed(c: &mut Contract, id: &str, ok: bool) -> Option<SignatureResponse> {
+        ctx("vault.testnet", DAY_NS);
+        let r = match ok {
+            true => Ok(SignatureResponse { big_r: Default::default(), s: Default::default(), recovery_id: 0 }),
+            false => Err(near_sdk::PromiseError::Failed),
+        };
+        c.on_withdraw_signed(id.into(), r)
+    }
+
+    #[test]
+    fn withdraw_signed_event_carries_unsigned_tx() {
+        let mut c = withdraw_ready();
+        let _ = c.execute_emergency_withdraw(1, btc(5_000_000));
+        let hex_tx = c.get_pending_tx("withdraw:1:0".into()).unwrap();
+        assert!(withdraw_signed(&mut c, "withdraw:1:0", true).is_some());
+        let e = event("withdraw_signed");
+        assert_eq!(e["data"]["withdraw_id"], "withdraw:1:0");
+        assert_eq!(e["data"]["unsigned_tx_hex"], hex_tx);
+    }
+
+    #[test]
+    fn withdraw_signer_failure_clears_pending_tx() {
+        let mut c = withdraw_ready();
+        let _ = c.execute_emergency_withdraw(1, btc(5_000_000));
+        assert!(withdraw_signed(&mut c, "withdraw:1:0", false).is_none());
+        assert_eq!(c.get_pending_tx("withdraw:1:0".into()), None);
+        assert_eq!(event("withdraw_failed")["data"]["withdraw_id"], "withdraw:1:0");
+    }
+
+    // ---- configure_tier guards (code review) ----
+
+    #[test]
+    #[should_panic(expected = "ERR_BAD_ROUNDS")]
+    fn zero_rounds_rejected() {
+        let mut c = setup();
+        c.configure_tier(1, Chain::Bitcoin, "p".into(), TIER_ADDR.into(), U128(1), 1, 0, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_BAD_COOLDOWN")]
+    fn cooldown_over_30_days_rejected() {
+        let mut c = setup();
+        c.configure_tier(1, Chain::Bitcoin, "p".into(), TIER_ADDR.into(), U128(1), 30 * 24 * 3600 + 1, 1, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_TIER_NOT_OPEN")]
+    fn releasing_tier_cannot_be_reconfigured() {
+        let mut c = ready();
+        let _ = c.release_funds(1, "a1".into(), BTC_TO.into(), btc(50_000));
+        ctx("owner.testnet", 2_000);
+        tier(&mut c, 1);
     }
 
     #[test]

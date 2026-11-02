@@ -3,10 +3,11 @@
 # broadcast it to testnet4. Testnet only. Uses near-cli-rs and the signer's
 # legacy keychain in ~/.near-credentials.
 #
-# Usage: release.sh <signer account> <vault account> <tier path> <utxo txid> <vout> <value_sat> <fee_rate> <recipient> <attempt_id>
+# Usage: release.sh <signer account> <vault account> <tier id> <tier path> <utxo txid> <vout> <value_sat> <fee_rate> <recipient> <attempt_id>
+# <tier path> must be the derivation_path configured for <tier id>.
 # <value_sat> is the amount the agent claims; a false one should be rejected by Bitcoin.
 set -euo pipefail
-SIGNER=$1 VAULT=$2 TIER_PATH=$3 TXID=$4 VOUT=$5 VALUE=$6 FEE=$7 TO=$8 ATTEMPT=$9
+SIGNER=$1 VAULT=$2 TIER=$3 TIER_PATH=$4 TXID=$5 VOUT=$6 VALUE=$7 FEE=$8 TO=$9 ATTEMPT=${10}
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=$(mktemp -d)
 
@@ -14,7 +15,7 @@ KEY=$(near contract call-function as-read-only v1.signer-prod.testnet derived_pu
   json-args "{\"path\":\"$TIER_PATH\",\"predecessor\":\"$VAULT\",\"domain_id\":0}" network-config testnet now 2>&1 |
   grep -o 'secp256k1:[1-9A-HJ-NP-Za-km-z]*' | head -1)
 
-ARGS="{\"tier_id\":1,\"attempt_id\":\"$ATTEMPT\",\"recipient\":\"$TO\",\"payload\":{\"Bitcoin\":{\"utxos\":[{\"txid\":\"$TXID\",\"vout\":$VOUT,\"value_sat\":$VALUE}],\"fee_rate_sat_vb\":$FEE}}}"
+ARGS="{\"tier_id\":$TIER,\"attempt_id\":\"$ATTEMPT\",\"recipient\":\"$TO\",\"payload\":{\"Bitcoin\":{\"utxos\":[{\"txid\":\"$TXID\",\"vout\":$VOUT,\"value_sat\":$VALUE}],\"fee_rate_sat_vb\":$FEE}}}"
 near contract call-function as-transaction "$VAULT" release_funds json-args "$ARGS" prepaid-gas '300 Tgas' \
   attached-deposit '0 NEAR' sign-as "$SIGNER" network-config testnet sign-with-legacy-keychain send > "$OUT/near.log" 2>&1
 grep -E 'Transaction ID|Error|Failure|panicked' "$OUT/near.log" | head -5

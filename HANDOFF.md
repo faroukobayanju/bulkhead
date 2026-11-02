@@ -25,7 +25,9 @@ Building is allowed now (HACKATHON.md Q-001: eligible work starts 2026-10-19).
   - The unsigned tx hex is kept in contract state (`get_pending_tx(id)`) and emitted in `release_signed` / `withdraw_signed` together with the signature.
   - The signer request uses the `v1.signer` format from the near/mpc README: `{request: {payload_v2: {"Ecdsa": hex}, path, domain_id: 0}}`, 1 yoctoNEAR deposit. The sandbox mock signer rejects any other shape.
   - Events follow NEP-297: `{"standard":"bulkhead","version":"1.0.0","event":…,"data":{…}}`. `attempt_id` must be 1–64 chars of `[A-Za-z0-9_-]` and is never reused.
-  - `configure_tier` takes an 8th argument, `evm: Option<EvmTier { chain_id, usdc }>`, required for Base tiers (chain 84532 on testnet, 8453 on mainnet). Bitcoin tier addresses must be P2WPKH on the vault's network.
+  - `configure_tier` takes an 8th argument, `evm: Option<EvmTier { chain_id, usdc }>`, required for Base tiers (chain 84532 on testnet, 8453 on mainnet). Bitcoin tier addresses must be P2WPKH on the vault's network. `rounds` must be at least 1, `cooldown_s` at most 30 days, and a tier in `Releasing` cannot be reconfigured.
+  - Emergency withdraw ids look like `withdraw:<tier>:<block height>`; `:` is not allowed in an `attempt_id`, so the two never collide.
+  - **Agent must check before calling `release_funds`:** a successful signature spends a round even if the Bitcoin tx can never be broadcast. Read the UTXO's real value and unspent status from mempool.space first, and confirm the tier address matches `derived_public_key` for the tier path (see `docs/spikes.md`).
 - **Spike S1 done on testnet (2026-11-02), see `docs/spikes.md`:** the vault signed Bitcoin testnet4 payout `a8ecea7c…8b1a` through `v1.signer-prod.testnet`, and Bitcoin rejected the same payout signed with a false input amount. How the agent assembles and broadcasts the tx is written up there, with reference code in `scripts/spike-s1/`.
 - **Do not deploy to mainnet:** the contract has had no review yet.
 - **Next:** rename to `bulkhead` and `scripts/deploy-vault.ts` (E24), then S3, then Task 10. Agents attach 300 TGas, never max gas (E14b).
