@@ -11,7 +11,8 @@ Building is allowed now (HACKATHON.md Q-001: eligible work starts 2026-10-19).
 
 ## Start now
 - **Person B, spike S2:** done. Results and model choices are in `docs/spikes.md`.
-- **Person B:** Tasks 5 and 6 in progress on `b/` branches, then 7, 8, 9, then 11 and 12. Test first.
+- **Person B:** Tasks 5, 6 and 7 are done and reviewed. Next: 8, 9, firewall general mode (`docs/superpowers/plans/2026-11-02-firewall-general-mode.md`), 11, 12. Test first.
+- **Person A, deadline:** a confirmed Bitcoin testnet transaction signed by the contract by end of 2026-11-06 UTC. If there is none, the first working payout moves to Base (Task 15 E24). Person A also renames the vault crate and account to `bulkhead` and adds `scripts/deploy-vault.ts` (E24).
 - **Database:** Convex replaces Postgres and Neon (Task 15 E20). Person B owns `convex/` and the Convex account. The contract does not touch Convex, so Person A needs no Convex account or setup. The attempt row schema in the interface freeze below is the only shared part. Ignore `DATABASE_URL`, `db/schema.sql` and Docker Postgres wherever earlier plan text mentions them.
 - **Person A:** continue on branch `a/vault-contract` (see Contract status below).
 - **Person A:** spikes S1 (contract-signed BTC testnet tx, plus a false-amount tx that Bitcoin must reject) and S3 (Shade template boots and registers).

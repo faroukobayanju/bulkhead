@@ -27,6 +27,24 @@ Ten runs is a small sample, so p95 here is close to the slowest run. Task 11 eva
 
 Temperature 0 does not guarantee identical output: three of the four models varied. Do not depend on replaying a judge call to get the same verdict. Store the verdict that was issued.
 
+### Judge latency with the real prompt (run 2026-11-02)
+
+The numbers above used a short prompt. With the real judge prompt and default reasoning, `Qwen/Qwen3.8-27B` took up to 6.6 s. Three of 10 benign messages passed the 3.5 s judge timeout, which would block them in production. Two of 20 calls hit `max_tokens` while reasoning, and one of those returned no content.
+
+Same 10 attacks and 10 benign messages, temperature 0, `max_tokens` 400:
+
+| Model and setting | p50 | p95 | Over 3.5 s | Attacks at risk 70+ | Benign under 40 | Empty |
+|---|---|---|---|---|---|---|
+| Qwen, default reasoning | about 3.7 s | 6.6 s | 12 of 19 | 9/10, one empty | 10/10 | 1 |
+| Qwen, `reasoning_effort: "none"` | 1.4 s | 1.9 s | 0 | 10/10 | 10/10 | 0 |
+| Qwen, `enable_thinking: false` | 1.5 s | 2.2 s | 0 | 10/10 | 10/10 | 0 |
+| DeepSeek, `reasoning_effort: "none"` | 1.3 s | 2.0 s | 0 | 10/10 | 10/10 | 0 |
+| DeepSeek, `enable_thinking: false` | 1.4 s | 5.3 s | 1 | 9/10 | 10/10 | 0 |
+
+**Decision:** the judge sends `reasoning_effort: "none"` on `Qwen/Qwen3.8-27B`. Twenty messages is a small sample, and Task 11's eval gates still decide whether the block rate holds. Tier agents still need their own measurement in Task 8.
+
+Runs cost about $0.016 in estimated spend.
+
 ### Attestation
 
 `GET /v1/attestation/report?model=<id>&nonce=<64 hex>&signing_algo=ecdsa` returns `gateway_attestation`, `model_attestations`, `ohttp_attestation`, `ohttp_key_config`. Reports are 80-320 KB.

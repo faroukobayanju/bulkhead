@@ -1,0 +1,6 @@
+{
+  "name": "bulkhead-shared",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@noble/hashes": "1.8.0" }
+}

@@ -1,0 +1,9 @@
+{
+  "nearai_base": "https://cloud-api.near.ai/v1",
+  "judge_model": "Qwen/Qwen3.8-27B",
+  "prices_usd_per_m": {
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017": { "in": 0.3, "out": 1.2 },
+    "Qwen/Qwen3.8-27B": { "in": 0.04, "out": 1.35 },
+    "z-ai/glm-5.3-flash": { "in": 0.08, "out": 0.5 }
+  }
+}
