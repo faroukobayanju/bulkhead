@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { main as latency, percentile } from "../../scripts/latency";
 import { main as smoke, ATTACKS, BENIGN } from "../../scripts/judge-smoke";
 
@@ -115,6 +115,31 @@ describe("judge-smoke with a fake NEAR AI", () => {
     expect(l.text()).toContain("stopping: estimated spend reached --max-usd 0.2");
     expect(l.out.filter(s => /^#\d\d /.test(s)).length).toBe(2);
     expect(code).toBe(0);
+  });
+
+  test("the spend key uses one clock value for the whole run, so midnight UTC cannot reset the count", async () => {
+    let day = Date.UTC(2026, 10, 2, 23, 59, 59);
+    const now = spyOn(Date, "now").mockImplementation(() => (day += 86_400_000));
+    try {
+      const net = fakeNearAI({ perCall: { prompt_tokens: 500, completion_tokens: 100_000 } });
+      const l = lines();
+      await smoke(["--max-usd", "0.2"], { LIVE: "1", NEARAI_API_KEY: KEY }, { fetch: net.fetch, log: l.log });
+      expect(net.calls.length).toBe(2);
+      expect(l.text()).toContain("stopping: estimated spend reached --max-usd 0.2");
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  test("a call refused because its worst case no longer fits stops the run without counting an error", async () => {
+    const net = fakeNearAI({ perCall: { prompt_tokens: 500, completion_tokens: 100_000 } });
+    const l = lines();
+    // one call settles at 135,020 micro-USD; of the 135,500 allowed, 480 are left, and another call's worst case is about 600
+    const code = await smoke(["--max-usd", "0.1355"], { LIVE: "1", NEARAI_API_KEY: KEY }, { fetch: net.fetch, log: l.log });
+    expect(code).toBe(0);
+    expect(net.calls.length).toBe(1);
+    expect(l.text()).toContain("stopping: another call could pass --max-usd 0.1355");
+    expect(l.text()).toContain("errors 0");
   });
 
   test("a call that fails is shown, counted, and makes the exit code 1", async () => {
