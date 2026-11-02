@@ -6,7 +6,7 @@ export async function guardedCall<T>(o: {
   askHuman: (v: Verdict) => Promise<boolean>;
 }): Promise<{ done: true; result: T } | { done: false; verdict: Verdict }> {
   const v = await o.check();
-  if (v.verdict === "block") return { done: false, verdict: v };
-  if (v.verdict === "escalate" && !(await o.askHuman(v))) return { done: false, verdict: v };
+  // Only an explicit allow, or an escalate a human approves, acts. Any other value (a malformed or unknown verdict) refuses.
+  if (v.verdict !== "allow" && !(v.verdict === "escalate" && (await o.askHuman(v)))) return { done: false, verdict: v };
   return { done: true, result: await o.act() };
 }

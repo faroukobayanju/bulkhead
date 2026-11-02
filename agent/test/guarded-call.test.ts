@@ -64,4 +64,34 @@ describe("guardedCall", () => {
     await guardedCall({ check: async () => v("escalate"), act: async () => 1, askHuman: async x => ((seen = x), false) });
     expect(seen).toEqual(v("escalate"));
   });
+
+  // check() comes from a network response, so its shape is not guaranteed. Only an explicit allow acts.
+  test.each([
+    ["an empty object", {}],
+    ["BLOCK in capitals", { verdict: "BLOCK", risk: 99, reason: "r" }],
+    ["ALLOW in capitals", { verdict: "ALLOW", risk: 0, reason: "r" }],
+    ["deny", { verdict: "deny", risk: 99, reason: "r" }],
+    ["null", { verdict: null, risk: 0, reason: "r" }],
+    ["a number", { verdict: 1, risk: 0, reason: "r" }],
+    ["an object", { verdict: { verdict: "allow" }, risk: 0, reason: "r" }],
+    ["an inherited-looking name", { verdict: "constructor", risk: 0, reason: "r" }],
+    ["allow with trailing space", { verdict: "allow ", risk: 0, reason: "r" }],
+  ])("an unknown verdict (%s) never acts and never asks", async (_, v) => {
+    const log: string[] = [];
+    const r = await guardedCall({
+      check: async () => v as unknown as Verdict,
+      act: async () => (log.push("act"), "done"),
+      askHuman: async () => (log.push("ask"), true),
+    });
+    expect(r).toEqual({ done: false, verdict: v as unknown as Verdict });
+    expect(log).toEqual([]);
+  });
+
+  test.each([["undefined", undefined], ["null", null], ["a string", "allow"]])("a check that returns %s never acts", async (_, v) => {
+    const log: string[] = [];
+    const p = guardedCall({ check: async () => v as unknown as Verdict, act: async () => (log.push("act"), 1), askHuman: async () => (log.push("ask"), true) });
+    if (typeof v === "string") expect(await p).toEqual({ done: false, verdict: v as never });
+    else await expect(p).rejects.toThrow();
+    expect(log).toEqual([]);
+  });
 });
