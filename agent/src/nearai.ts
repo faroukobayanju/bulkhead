@@ -34,6 +34,8 @@ export class NearAIError extends Error {
   }
 }
 
+export const spendKey = (ms: number) => `nearai:spend:${utcDay(ms)}`;
+
 export function dailyLimitUsd(env: Record<string, string | undefined>): number {
   const raw = env.NEARAI_DAILY_USD;
   if (raw === undefined) return 5;
@@ -76,8 +78,9 @@ export function makeNearAI(o: {
       const price = Object.hasOwn(o.prices, r.model) ? o.prices[r.model] : undefined;
       if (!price) throw new NearAIError("no_price", `no price for model ${r.model}`);
 
-      const day = utcDay(o.clock());
-      const key = `nearai:spend:${day}`;
+      const at = o.clock();
+      const day = utcDay(at);
+      const key = spendKey(at);
       const before = await o.counter.get(key);
       if (before >= limit) {
         await alertOnce(day, before);
