@@ -30,6 +30,10 @@ const TOOL = /release[\s_-]?funds/i;
 
 const MAX_DEPTH = 2; // decoding layers: base64(rot13(x)) and base64(base64(x)) are seen, three layers are not
 const MAX_DECODED = 16; // entries returned; tool-name hits are kept first so decoys cannot push them out
+// The serialized result must fit the 16 KB firewall body limit even though NFKC can expand input 18x:
+// 8192 (text) + 16 * (448 + 32 entry overhead) + 128 (keys, flags) = 16000 <= 16384. Sizes are JSON UTF-8 bytes.
+const MAX_TEXT_BYTES = 8192;
+const MAX_VALUE_BYTES = 448;
 
 type Decoded = { kind: "base64" | "hex" | "morse" | "rot13" | "tags"; value: string };
 
@@ -39,6 +43,20 @@ const utf8 = (b: Uint8Array) => {
 };
 
 const readable = (s: string) => s.length >= 8 && (s.match(/[A-Za-z ]/g)?.length ?? 0) / s.length >= 0.6;
+
+// Bytes one code point takes in JSON.stringify output: quotes/backslashes and control chars are escaped,
+// lone surrogates become 6-byte escapes.
+const jsonBytes = (cp: number) =>
+  cp === 34 || cp === 92 ? 2 : cp < 32 || (cp >= 0xd800 && cp < 0xe000) ? 6 : cp < 128 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+function clip(s: string, budget: number) {
+  let used = 0, end = 0;
+  for (const c of s) {
+    used += jsonBytes(c.codePointAt(0)!);
+    if (used > budget) break;
+    end += c.length;
+  }
+  return s.slice(0, end);
+}
 
 const fold = (s: string) => s.replace(CONFUSABLE, c => CONFUSABLES[c]!);
 const clean = (s: string) => fold(s.replace(INVISIBLE, "").normalize("NFKC"));
@@ -61,12 +79,27 @@ function layer(raw: string): Decoded[] {
   const tags = [...raw].map(c => c.codePointAt(0)! - 0xe0000).filter(n => n >= 0x20 && n <= 0x7e).map(n => String.fromCharCode(n)).join("");
   if (tags) add("tags", tags);
   for (const m of text.match(/[A-Za-z0-9+/]{16,}={0,2}/g) ?? []) add("base64", utf8(Buffer.from(m, "base64")));
-  for (const m of text.match(/(?:0x)?(?:[0-9a-fA-F]{2}){8,}/g) ?? []) add("hex", utf8(Buffer.from(m.replace(/^0x/, ""), "hex")));
+  // Whitespace-chunked base64: rejoin runs of alphabet-only tokens. The `*` form always matches at its first token
+  // (no failing-then-retrying at every start position), so this stays linear.
+  for (const m of text.match(/[A-Za-z0-9+/]{4,}(?:\s+[A-Za-z0-9+/]{4,})*={0,2}/g) ?? []) {
+    const joined = m.replace(/\s+/g, "");
+    if (joined.length !== m.length && joined.length >= 16) add("base64", utf8(Buffer.from(joined, "base64")));
+  }
+  // Hex bytes may be glued, space/comma separated, and 0x- or backslash-x prefixed. Separators and prefixes never overlap
+  // the hex digits, so matching stays linear.
+  for (const m of text.match(/(?:(?:0x|\\x)?[0-9a-fA-F]{2}[\s,]*){8,}/g) ?? []) {
+    const hex = m.match(/[0-9a-fA-F]{2}/g)!.join("");
+    // Decimal lists ("45 62 71 ...") read as hex spell letters; accept digits-only hex only when every byte is 0x/\x-prefixed.
+    // Payloads that spell the tool name always contain an a-f digit (the 'l' in "release" is 0x6c).
+    if (/[a-fA-F]/.test(hex) || (m.match(/x/g)?.length ?? 0) * 2 === hex.length) add("hex", utf8(Buffer.from(hex, "hex")));
+  }
   for (const m of text.match(/(?:[.\-]{1,5}(?:\s+|\s*\/\s*)){3,}[.\-]{1,5}/g) ?? []) {
     add("morse", m.trim().split(/\s*\/\s*/).map(w => w.split(/\s+/).map(c => MORSE[c] ?? "").join("")).join(" "));
   }
+  // Only the segment around the hit, not the whole message (which NFKC may have expanded).
   const r = rot13(text);
-  if (TOOL.test(r) && !TOOL.test(text)) add("rot13", r);
+  const hit = TOOL.exec(r);
+  if (hit && !TOOL.test(text)) add("rot13", r.slice(Math.max(0, hit.index - 64), hit.index + hit[0].length + 128));
   return out;
 }
 
@@ -93,6 +126,10 @@ export function normalize(input: string) {
   if (all.length) flags.add("encoded_payload");
   if (TOOL.test(text) || all.some(d => TOOL.test(d.value))) flags.add("tool_name_mention");
 
-  const decoded = all.sort((a, b) => Number(TOOL.test(b.value)) - Number(TOOL.test(a.value))).slice(0, MAX_DECODED);
-  return { text, decoded, flags: [...flags] };
+  // Flags above saw the full values; only now clip what leaves this function.
+  const decoded = all
+    .sort((a, b) => Number(TOOL.test(b.value)) - Number(TOOL.test(a.value)))
+    .slice(0, MAX_DECODED)
+    .map(d => ({ kind: d.kind, value: clip(d.value, MAX_VALUE_BYTES) }));
+  return { text: clip(text, MAX_TEXT_BYTES), decoded, flags: [...flags] };
 }
