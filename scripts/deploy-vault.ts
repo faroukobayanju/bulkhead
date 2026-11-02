@@ -5,7 +5,7 @@
 //
 // Needs cargo-near and near-cli-rs, and the owner's key in the near-cli legacy
 // keychain (~/.near-credentials). Testnet only. See docs/deploy-your-vault.md.
-import { configureTierArgs, initArgs, parseArgs, TESTNET_SIGNER, tierAddress, type DeployOptions } from "./lib/vault-deploy";
+import { configureTierArgs, derivedKeyCommand, initArgs, parseArgs, TESTNET_SIGNER, tierAddress, type DeployOptions } from "./lib/vault-deploy";
 
 const REPO = new URL("..", import.meta.url).pathname;
 const WASM = `${REPO}contracts/target/near/bulkhead_vault/bulkhead_vault.wasm`;
@@ -19,7 +19,6 @@ function run(cmd: string[], cwd = REPO): string {
   return out;
 }
 
-const near = (...args: string[]) => run(["near", ...args, "network-config", "testnet"]);
 const send = (...args: string[]) => run(["near", ...args, "network-config", "testnet", "sign-with-legacy-keychain", "send"]);
 
 function accountExists(id: string): boolean {
@@ -58,8 +57,7 @@ function main() {
     "prepaid-gas", "100 Tgas", "attached-deposit", "0 NEAR");
 
   console.log(`4/5 deriving tier ${o.tier}'s Bitcoin address from the signer`);
-  const view = near("contract", "call-function", "as-read-only", TESTNET_SIGNER, "derived_public_key", "json-args",
-    JSON.stringify({ path: o.path, predecessor: o.vault, domain_id: 0 }), "now");
+  const view = run(derivedKeyCommand(o));
   const key = view.match(/secp256k1:[1-9A-HJ-NP-Za-km-z]+/)?.[0];
   if (!key) throw new Error(`no derived key in signer reply:\n${view.slice(-500)}`);
   const address = tierAddress(key, "testnet");

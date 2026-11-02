@@ -146,6 +146,13 @@ export function tierAddress(derived: string, network: Network): string {
   return p2wpkhAddress(bytesToHex(ripemd160(sha256(compressedKey(derived)))), network);
 }
 
+/** near-cli-rs view of the tier key; `now` (block reference) must come after the network. */
+export function derivedKeyCommand(o: DeployOptions): string[] {
+  const args = JSON.stringify({ path: o.path, predecessor: o.vault, domain_id: 0 });
+  return ["near", "contract", "call-function", "as-read-only", TESTNET_SIGNER, "derived_public_key", "json-args", args,
+    "network-config", "testnet", "now"];
+}
+
 // ---- contract call arguments ----
 
 export function initArgs(owner: string) {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { configureTierArgs, initArgs, p2wpkhAddress, parseArgs, tierAddress } from "../lib/vault-deploy";
+import { configureTierArgs, derivedKeyCommand, initArgs, p2wpkhAddress, parseArgs, tierAddress } from "../lib/vault-deploy";
 
 // derived_public_key("bulkhead-tier-1", vault.bulkhead-haikeys.testnet, domain 0) on
 // v1.signer-prod.testnet. Spike S1 spent from this address on testnet4, so the pair is proven.
@@ -74,6 +74,17 @@ describe("arguments", () => {
 
   test("unknown flag is an error, not ignored", () => {
     expect(() => parseArgs([...base, "--max-btc", "1"])).toThrow("--max-btc");
+  });
+});
+
+describe("near-cli commands", () => {
+  test("derived key view puts 'now' after the network, as near-cli-rs requires", () => {
+    const o = parseArgs(["--owner", "alice.testnet", "--max-sats", "1", "--cooldown", "1", "--rounds", "1"]);
+    expect(derivedKeyCommand(o)).toEqual([
+      "near", "contract", "call-function", "as-read-only", "v1.signer-prod.testnet", "derived_public_key",
+      "json-args", JSON.stringify({ path: "bulkhead-tier-1", predecessor: "vault.alice.testnet", domain_id: 0 }),
+      "network-config", "testnet", "now",
+    ]);
   });
 });
 
