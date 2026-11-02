@@ -34,7 +34,7 @@ async fn setup() -> anyhow::Result<(
     let full = w.dev_create_account().await?;
     vault.call("new").args_json(json!({"owner_id":owner.id(),"mpc_contract":signer.id(),"mainnet":false})).transact().await?.into_result()?;
     owner.call(vault.id(),"configure_tier")
-        .args_json(json!({"id":1,"chain":"Bitcoin","derivation_path":"drainme-tier-1","address":BTC_TO,"max_release":"100000","cooldown_s":3600,"rounds":2}))
+        .args_json(json!({"id":1,"chain":"Bitcoin","derivation_path":"bulkhead-tier-1","address":BTC_TO,"max_release":"100000","cooldown_s":3600,"rounds":2}))
         .transact().await?.into_result()?;
     owner.call(vault.id(),"register_agent_stub").args_json(json!({"account":full.id(),"codehash":"abc"})).transact().await?.into_result()?;
 
@@ -104,7 +104,7 @@ async fn signer_gets_mpc_shaped_request_with_the_bitcoin_sighash() -> anyhow::Re
     let last: Option<String> = signer.view("last_request").await?.json()?;
     let req: serde_json::Value = serde_json::from_str(&last.expect("signer saw no request"))?;
     let (sighash, _) = bulkhead_vault::btc::build_payout(&[utxo(50_000)], BTC_TO, BTC_TO, 5).unwrap();
-    assert_eq!(req, json!({"payload_v2":{"Ecdsa":hex::encode(sighash)},"path":"drainme-tier-1","domain_id":0}));
+    assert_eq!(req, json!({"payload_v2":{"Ecdsa":hex::encode(sighash)},"path":"bulkhead-tier-1","domain_id":0}));
     Ok(())
 }
 

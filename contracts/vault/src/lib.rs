@@ -553,12 +553,12 @@ mod tests {
     const EVM_TO: &str = "0x52908400098527886E0F7030069857D2E4169EE7";
 
     fn tier(c: &mut Contract, id: u8) {
-        c.configure_tier(id, Chain::Bitcoin, "drainme-tier".into(), TIER_ADDR.into(), U128(100_000), 3600, 5, None);
+        c.configure_tier(id, Chain::Bitcoin, "bulkhead-tier".into(), TIER_ADDR.into(), U128(100_000), 3600, 5, None);
     }
 
     fn base_tier(c: &mut Contract, id: u8) {
         let evm = EvmTier { chain_id: 84532, usdc: USDC_SEPOLIA.into() };
-        c.configure_tier(id, Chain::Base, "drainme-tier-2".into(), EVM_TO.into(), U128(50_000_000), 3600, 4, Some(evm));
+        c.configure_tier(id, Chain::Base, "bulkhead-tier-2".into(), EVM_TO.into(), U128(50_000_000), 3600, 4, Some(evm));
     }
 
     #[test]
@@ -904,10 +904,10 @@ mod tests {
     #[test]
     fn sign_request_matches_mpc_wire_format() {
         // Shape from the v1.signer README: payload_v2 tagged Ecdsa, hex, domain 0 = secp256k1.
-        let r = SignRequest::ecdsa(&[0x52; 32], "drainme-tier-1".into());
+        let r = SignRequest::ecdsa(&[0x52; 32], "bulkhead-tier-1".into());
         let want = near_sdk::serde_json::json!({
             "payload_v2": {"Ecdsa": "52".repeat(32)},
-            "path": "drainme-tier-1",
+            "path": "bulkhead-tier-1",
             "domain_id": 0
         });
         assert_eq!(near_sdk::serde_json::to_value(&r).unwrap(), want);

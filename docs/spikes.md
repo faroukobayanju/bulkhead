@@ -29,9 +29,9 @@ BIP-143 commits to the input amount, so a signature over a false amount fails sc
 
 `release_funds` with `value_sat: 341067`, fee rate 2 sat/vB, recipient `tb1qerzrlxcfu24davlur5sqmgzzgsal6wusda40er` (the faucet's return address). NEAR tx `DP1HkZNtYkFhbj6i1nooUiinQ11GS1q5N4496UvYSs4S`.
 
-- Bitcoin txid: **`a8ecea7c06b387f86349322cf025233c3f170e69a2a31f27e274e70ae89e8b1a`**, accepted into the testnet4 mempool, https://mempool.space/testnet4/tx/a8ecea7c06b387f86349322cf025233c3f170e69a2a31f27e274e70ae89e8b1a
+- Bitcoin txid: **`a8ecea7c06b387f86349322cf025233c3f170e69a2a31f27e274e70ae89e8b1a`**, https://mempool.space/testnet4/tx/a8ecea7c06b387f86349322cf025233c3f170e69a2a31f27e274e70ae89e8b1a
 - Output: 340,847 sats (341,067 minus a 220 sat fee: 110 vB at 2 sat/vB).
-- Confirmation: pending at the time of writing.
+- **Confirmed** in testnet4 block 158586 (`00000000b288f58d657f950324ec685589b7eadd0bebdc725a1b77c87172446e`).
 
 ### What the agent needs (Task 8/9)
 
