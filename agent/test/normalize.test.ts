@@ -378,3 +378,8 @@ describe("normalize", () => {
 function range(a: number, b: number) {
   return Array.from({ length: b - a + 1 }, (_, i) => a + i);
 }
+
+test("every junk run is removed from a tool-name payload", () => {
+  const raw = Buffer.from('{"name":"rele\xffase_fu\xffnds"}', "latin1").toString("base64");
+  expect(normalize(raw).decoded.some(d => d.value.includes("release_funds"))).toBe(true);
+});

@@ -152,7 +152,7 @@ function reportable(value: string): string[] {
   }
   const parts = value.split(GARBAGE).filter(f => mentions(f) || (f.length >= 16 && PLAIN.test(f) && readable(f)));
   if (!mentions(value) || parts.some(mentions)) return parts;
-  return [around(value.replace(GARBAGE, "")), ...parts];
+  return [around(value.split(GARBAGE).join("")), ...parts];
 }
 
 // Recurse into every decoded layer, readable or not (a hex or base64 string wrapping the real payload is unreadable).
