@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { configureTierArgs, derivedKeyCommand, initArgs, p2wpkhAddress, parseArgs, tierAddress } from "../lib/vault-deploy";
+import { configureTierArgs, derivedKeyCommand, initArgs, isExpiredTx, p2wpkhAddress, parseArgs, tierAddress } from "../lib/vault-deploy";
 
 // derived_public_key("bulkhead-tier-1", vault.bulkhead-haikeys.testnet, domain 0) on
 // v1.signer-prod.testnet. Spike S1 spent from this address on testnet4, so the pair is proven.
@@ -78,6 +78,12 @@ describe("arguments", () => {
 });
 
 describe("near-cli commands", () => {
+  test("an expired transaction is safe to resend; other failures are not", () => {
+    expect(isExpiredTx("Error: \u001b[91mError: Transaction has expired.\u001b[0m")).toBe(true);
+    expect(isExpiredTx("Error: Smart contract panicked: ERR_NOT_OWNER")).toBe(false);
+    expect(isExpiredTx("")).toBe(false);
+  });
+
   test("derived key view puts 'now' after the network, as near-cli-rs requires", () => {
     const o = parseArgs(["--owner", "alice.testnet", "--max-sats", "1", "--cooldown", "1", "--rounds", "1"]);
     expect(derivedKeyCommand(o)).toEqual([

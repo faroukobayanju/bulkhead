@@ -153,6 +153,11 @@ export function derivedKeyCommand(o: DeployOptions): string[] {
     "network-config", "testnet", "now"];
 }
 
+/** An expired transaction never executed, so sending it again cannot double-apply. */
+export function isExpiredTx(output: string): boolean {
+  return output.includes("Transaction has expired");
+}
+
 // ---- contract call arguments ----
 
 export function initArgs(owner: string) {

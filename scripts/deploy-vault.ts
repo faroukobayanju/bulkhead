@@ -5,7 +5,7 @@
 //
 // Needs cargo-near and near-cli-rs, and the owner's key in the near-cli legacy
 // keychain (~/.near-credentials). Testnet only. See docs/deploy-your-vault.md.
-import { configureTierArgs, derivedKeyCommand, initArgs, parseArgs, TESTNET_SIGNER, tierAddress, type DeployOptions } from "./lib/vault-deploy";
+import { configureTierArgs, derivedKeyCommand, initArgs, isExpiredTx, parseArgs, TESTNET_SIGNER, tierAddress, type DeployOptions } from "./lib/vault-deploy";
 
 const REPO = new URL("..", import.meta.url).pathname;
 const WASM = `${REPO}contracts/target/near/bulkhead_vault/bulkhead_vault.wasm`;
@@ -13,10 +13,14 @@ const WASM = `${REPO}contracts/target/near/bulkhead_vault/bulkhead_vault.wasm`;
 const STUB_CODEHASH = "testnet-stub";
 
 function run(cmd: string[], cwd = REPO): string {
-  const p = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe" });
-  const out = p.stdout.toString() + p.stderr.toString();
-  if (p.exitCode !== 0) throw new Error(`${cmd.slice(0, 3).join(" ")} failed:\n${out.slice(-1500)}`);
-  return out;
+  // Testnet RPC sometimes reports a fresh transaction as expired; it never ran, so resend it.
+  for (let attempt = 1; ; attempt++) {
+    const p = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe" });
+    const out = p.stdout.toString() + p.stderr.toString();
+    if (p.exitCode === 0) return out;
+    if (attempt < 3 && isExpiredTx(out)) continue;
+    throw new Error(`${cmd.slice(0, 3).join(" ")} failed:\n${out.slice(-1500)}`);
+  }
 }
 
 const send = (...args: string[]) => run(["near", ...args, "network-config", "testnet", "sign-with-legacy-keychain", "send"]);
