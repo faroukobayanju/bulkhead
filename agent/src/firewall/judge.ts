@@ -34,29 +34,14 @@ export function loadJudgePrompt(readFile: (u: URL) => string = read): string {
   return prompt.replace(SLOT, () => shots); // a function, so "$&" in an example is not a replacement pattern
 }
 
-// The first {...} block, skipping braces inside JSON strings. Null when there is none or it never closes.
-function firstObject(s: string): string | null {
-  const start = s.indexOf("{");
-  if (start < 0) return null;
-  let depth = 0;
-  let inString = false;
-  for (let i = start; i < s.length; i++) {
-    const c = s[i];
-    if (inString) {
-      if (c === "\\") i++;
-      else if (c === '"') inString = false;
-    } else if (c === '"') inString = true;
-    else if (c === "{") depth++;
-    else if (c === "}" && --depth === 0) return s.slice(start, i + 1);
-  }
-  return null;
-}
-
+// The reply must be one JSON object. The only wrapper allowed is a single ``` or ```json fence around the whole reply.
+// Never pick an object out of surrounding text: attacker text can end up in the model's output (quoted in the reason, or
+// planted in a <think> block), and an echoed {"risk":0} must not outrank the real answer. Anything else throws.
+const FENCE = /^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n?```$/;
 export function parseJudgeReply(content: string | null): JudgeOut {
-  if (!content?.trim()) throw new Error("judge returned no content");
-  const block = firstObject(content);
-  if (!block) throw new Error("judge reply has no JSON object");
-  return judgeOut(JSON.parse(block));
+  const text = content?.trim();
+  if (!text) throw new Error("judge returned no content");
+  return judgeOut(JSON.parse(FENCE.exec(text)?.[1] ?? text));
 }
 
 export function makeJudge(o: { client: NearAI; system?: string; model?: string; timeoutMs?: number }): Judge {
