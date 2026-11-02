@@ -423,6 +423,17 @@ describe("reservation", () => {
     for (const f of failed) expect((f.reason as NearAIError).code).toBe("spend_cap");
   });
 
+  test("the reservation is one capped add of the worst case, made before the call", async () => {
+    const inner = memoryCounter();
+    const adds: { key: string; n: number; cap?: number; fetched: boolean }[] = [];
+    let fetched = false;
+    const counter = { get: inner.get, add: async (key: string, n: number, cap?: number) => (adds.push({ key, n, cap, fetched }), inner.add(key, n, cap)) };
+    const s = setup({ counter, fetch: async () => ((fetched = true), json(reply({ prompt_tokens: 10, completion_tokens: 10 }))) });
+    await s.ai.chat(req());
+    expect(adds[0]).toEqual({ key: `nearai:spend:${utcDay(T0)}`, n: worst, cap: 10_000, fetched: false });
+    expect(adds[1]).toMatchObject({ n: 30 - worst, cap: undefined, fetched: true }); // the settle: uncapped, a negative step here
+  });
+
   test("calls that fit together all run, and no more than fit", async () => {
     const s = setup({ dailyUsd: (3 * worst + 100) / 1e6, fetch: async () => json(reply({ prompt_tokens: 10, completion_tokens: 10 })) });
     // each settles to 30, so after the first three settle there is room again; sequential batches show the settle frees budget
