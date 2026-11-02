@@ -19,11 +19,18 @@ Building is allowed now (HACKATHON.md Q-001: eligible work starts 2026-10-19).
 - **Both:** run `npx skills add near/agent-skills` (E18).
 
 ## Contract status (branch `a/vault-contract`)
-- **Done, tested, 59 unit + 5 sandbox tests pass (`scripts/test-contracts.sh`):** Tasks 1–3 with Task 15 E1, E2, E7 and E14: tiers, spending cap, cooldown, rounds, codehash auth, timelocks, roots. Tasks 1–3 passed tests but have had no reviewer.
-- **Partial, unreviewed:** Task 4. `btc.rs` and `evm.rs` exist and are cross-checked against the `bitcoin` and `alloy` crates, but are **not wired into `release_funds`**.
-- **Do not deploy:** `release_funds` still signs a placeholder hash (marked `ponytail:`).
-- **Next:** wire the builders into `release_funds` and emergency withdraw, the `release_signed` hex event, the 290 TGas test, then spikes S1 and S3, then Task 10.
-- **Check in S1:** the real `v1.signer` request shape and fee (`SignRequest`, `SIGN_DEPOSIT` are placeholders). Agents attach 300 TGas, never max gas (E14b).
+- **Done, tested, 77 unit + 7 sandbox tests pass (`scripts/test-contracts.sh`):** Tasks 1–4 with Task 15 E1, E2, E7 and E14: tiers, spending cap, cooldown, rounds, codehash auth, timelocks, roots, and the real payout transactions. Nothing has had a reviewer yet.
+- **Task 4 (in code, not yet proven on testnet):**
+  - `release_funds` and `execute_emergency_withdraw(tier_id, payload)` build the real Bitcoin or Base USDC transaction and send its sighash to the signer.
+  - The unsigned tx hex is kept in contract state (`get_pending_tx(id)`) and emitted in `release_signed` / `withdraw_signed` together with the signature.
+  - The signer request uses the `v1.signer` format from the near/mpc README: `{request: {payload_v2: {"Ecdsa": hex}, path, domain_id: 0}}`, 1 yoctoNEAR deposit. The sandbox mock signer rejects any other shape.
+  - Events follow NEP-297: `{"standard":"bulkhead","version":"1.0.0","event":…,"data":{…}}`. `attempt_id` must be 1–64 chars of `[A-Za-z0-9_-]` and is never reused.
+  - `configure_tier` takes an 8th argument, `evm: Option<EvmTier { chain_id, usdc }>`, required for Base tiers (chain 84532 on testnet, 8453 on mainnet). Bitcoin tier addresses must be P2WPKH on the vault's network. `rounds` must be at least 1, `cooldown_s` at most 30 days, and a tier in `Releasing` cannot be reconfigured.
+  - Emergency withdraw ids look like `withdraw:<tier>:<block height>`; `:` is not allowed in an `attempt_id`, so the two never collide.
+  - **Agent must check before calling `release_funds`:** a successful signature spends a round even if the Bitcoin tx can never be broadcast. Read the UTXO's real value and unspent status from mempool.space first, and confirm the tier address matches `derived_public_key` for the tier path (see `docs/spikes.md`).
+- **Spike S1 done on testnet (2026-11-02), see `docs/spikes.md`:** the vault signed Bitcoin testnet4 payout `a8ecea7c…8b1a` through `v1.signer-prod.testnet`, and Bitcoin rejected the same payout signed with a false input amount. How the agent assembles and broadcasts the tx is written up there, with reference code in `scripts/spike-s1/`.
+- **Do not deploy to mainnet:** the contract has had no review yet.
+- **Next:** rename to `bulkhead` and `scripts/deploy-vault.ts` (E24), then S3, then Task 10. Agents attach 300 TGas, never max gas (E14b).
 - **Choices already made:** Rust pinned to 1.96 because near-sdk 5.30 needs a newer compiler. `ReleasePayload` was added in Task 3, ahead of Task 4.
 
 ## Interface freeze (end of day 2), owned jointly

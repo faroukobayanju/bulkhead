@@ -1,8 +1,47 @@
 # Spike results
 
-## S1: contract-signed BTC testnet tx
+## S1: contract-signed BTC testnet tx (run 2026-11-02)
 
-Owner: @haikeysgit. Not recorded yet.
+Owner: @haikeysgit. Result: **the vault contract signed a Bitcoin testnet4 payout through `v1.signer-prod.testnet`, and Bitcoin rejected the same payout signed with a false input amount.** The Bitcoin deadline in E24 (end of 2026-11-06 UTC) is met once the payout confirms.
+
+| Item | Value |
+|---|---|
+| Vault | `vault.bulkhead-haikeys.testnet` (owner `bulkhead-haikeys.testnet`), Task 4 code at commit `7b5765e`, built with `stub-attestation` |
+| Wasm sha256 | `2b8be03aea1bfda53bf51d7558f6b39da4bae892db8bd8b22077cd970e9bbfde` |
+| Signer | `v1.signer-prod.testnet`, domain 0 (secp256k1), 1 yoctoNEAR deposit, release called with 300 TGas |
+| Tier 1 path | `bulkhead-tier-1` |
+| Derived key | `secp256k1:2uQDMhqCaRrFVW4mNWv2VchYtcagNAWPyUEWMjzdJkdcf76FcUAgpkFUWzwDtER5TmXagPH2pFFQAc9op3kjudX9` (compressed `025f3478…f146`) |
+| Tier 1 address | `tb1qvg2du726tmgjzcz89m6zj7dcdzdcyeja7z9zx5` (P2WPKH) |
+| Funding | coinfaucet.eu, 341,067 sats, tx `b7a37d34906d713f2436c3992495118f06a59f26f6acdcb3c5d3224959048bd1:0` |
+| Spike tier settings | `max_release` 2,000,000 sats, `cooldown_s` 60, 10 rounds |
+
+### False amount: rejected
+
+`release_funds` with `value_sat: 341000` (true value 341,067), fee rate 2 sat/vB. NEAR tx `4ikd9zgMEGSquu6EqUH1Ly1fB7Lg7wUG2KdjoVoShWW1`. The MPC signature was valid for the sighash the contract built, but testnet4 refused the transaction:
+
+```
+mempool-script-verify-flag-failed (Signature must be zero for failed CHECK(MULTI)SIG operation), input 0
+```
+
+BIP-143 commits to the input amount, so a signature over a false amount fails script verification. An agent that lies about `value_sat` to get under `max_release` produces a transaction Bitcoin will not accept. This is the property the spending cap relies on (E14).
+
+### True amount: broadcast
+
+`release_funds` with `value_sat: 341067`, fee rate 2 sat/vB, recipient `tb1qerzrlxcfu24davlur5sqmgzzgsal6wusda40er` (the faucet's return address). NEAR tx `DP1HkZNtYkFhbj6i1nooUiinQ11GS1q5N4496UvYSs4S`.
+
+- Bitcoin txid: **`a8ecea7c06b387f86349322cf025233c3f170e69a2a31f27e274e70ae89e8b1a`**, accepted into the testnet4 mempool, https://mempool.space/testnet4/tx/a8ecea7c06b387f86349322cf025233c3f170e69a2a31f27e274e70ae89e8b1a
+- Output: 340,847 sats (341,067 minus a 220 sat fee: 110 vB at 2 sat/vB).
+- Confirmation: pending at the time of writing.
+
+### What the agent needs (Task 8/9)
+
+- **Tier address:** `derived_public_key({path, predecessor: <vault account>, domain_id: 0})` on the signer returns `secp256k1:<base58 of 64 bytes>`, the uncompressed x‖y without the `04` prefix. Compress it (`02`/`03` by y parity), then `hash160`, then a bech32 v0 address with HRP `tb` (testnet) or `bc` (mainnet).
+- **Signature:** the `release_signed` event carries `signature: {big_r: {affine_point: <33 bytes hex>}, s: {scalar: <32 bytes hex>}, recovery_id}`. `r` is bytes 1..33 of `big_r`. The signed message is the 32-byte sighash from `release_requested.payload`, without further hashing. `recovery_id` is not needed for Bitcoin. `s` came back low-s.
+- **Assembly:** `unsigned_tx_hex` is the legacy layout. Insert the segwit marker and flag `00 01` after the version, and add the witness `[DER(r, s) ‖ 0x01, compressed pubkey]` before the locktime.
+- **Verify first:** check the signature against the tier key before broadcasting, because recovery returns some key even for a bad signature.
+- **Broadcast:** `POST https://mempool.space/testnet4/api/tx` with `Content-Type: text/plain`. The default form encoding returns `TX decode failed`.
+
+Reference code: `scripts/spike-s1/btc.py` (pure Python stdlib) and `scripts/spike-s1/release.sh`.
 
 ## S2: NEAR AI Cloud (run 2026-11-02)
 
