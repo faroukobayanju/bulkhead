@@ -1,4 +1,4 @@
-import type { normalize } from "../normalize";
+import { clean, type normalize } from "../normalize";
 import type { Technique } from "./verdict";
 
 type N = ReturnType<typeof normalize>;
@@ -12,9 +12,9 @@ const RULES: [name: string, re: RegExp, weight: number, technique: Technique][] 
   ["tool_spoof", /(\bfunction_call|\btool_call|<\/?tool|"name"\s*:\s*"release_funds")/i, 45, "tool_spoof"],
 ];
 
-// ponytail: scans the messages only, not proposed_action args: a plain release_funds proposal would trip the tool-name
-// flags on every legitimate call, so the judge alone reads the proposal. The normalizer clips its text to 8 KB, so the
-// raw input is scanned too, or padding could push a phrase past the clip. The `truncated` flag is deliberately not scored.
+// What is scanned: the raw input, the cleaned input in full (n.text is clipped to 8 KB, so padding could push a phrase out
+// of it, and rules that need cleaning would then only see the raw spelling), the normalizer's clipped text, and every decoded
+// value. The `truncated` flag is deliberately not scored: a long message is not an attack.
 export function heuristicScore(n: N, raw: string) {
   const hits: string[] = [];
   let score = 0;
@@ -23,7 +23,7 @@ export function heuristicScore(n: N, raw: string) {
     hits.push(name);
     if (weight > score) [score, technique] = [weight, t];
   };
-  const hay = [raw, n.text, ...n.decoded.map(d => d.value)].join("\n");
+  const hay = [raw, clean(raw), n.text, ...n.decoded.map(d => d.value)].join("\n");
   for (const [name, re, w, t] of RULES) if (re.test(hay)) hit(name, w, t);
   if (n.flags.includes("encoded_payload") && n.flags.includes("tool_name_mention")) hit("encoded_tool", 50, "encoding");
   if (n.flags.includes("zero_width")) hit("zero_width", 25, "encoding");

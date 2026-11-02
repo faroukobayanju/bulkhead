@@ -77,7 +77,7 @@ function clip(s: string, budget: number) {
 }
 
 const fold = (s: string) => s.replace(CONFUSABLE, c => CONFUSABLES[c]!);
-const clean = (s: string) => fold(s.replace(INVISIBLE, "").normalize("NFKC"));
+export const clean = (s: string) => fold(s.replace(INVISIBLE, "").normalize("NFKC"));
 
 // NFKC turned a non-ASCII char into one ASCII letter (fullwidth, math-bold, circled...). Not "\u2026" -> "..." or "\u2122" -> "TM".
 const lettersChanged = (s: string) =>

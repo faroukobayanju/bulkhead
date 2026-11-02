@@ -37,7 +37,9 @@ export async function checkFirewall(req: CheckReq, judge: Judge, opts: { timeout
   const ac = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const raw = req.messages.map(m => m.content).join("\n");
+    // proposed_action args are attacker-controlled text too (a memo field, a base64 blob), so they are scanned and decoded like a
+    // message. The tool name is not: it is the agent's own, and the judge reads it.
+    const raw = [...req.messages.map(m => m.content), ...(req.proposed_action ? [JSON.stringify(req.proposed_action.args)] : [])].join("\n");
     const n = normalize(raw);
     const h = heuristicScore(n, raw);
     const timeout = new Promise<never>((_, reject) => {
