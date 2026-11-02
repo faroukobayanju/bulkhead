@@ -10,8 +10,9 @@ Building is allowed now (HACKATHON.md Q-001: eligible work starts 2026-10-19).
 | Folders | `contracts/`, `scripts/` (chain scripts) | `agent/`, `shared/`, `web/`, `data/`, `convex/` |
 
 ## Start now
-- **Person B, spike S2:** list NEAR AI Cloud models; pick 2 with reliable tool calls (10/10); run 10 identical temperature-0 calls and record whether outputs differ; save the attestation report keys. Record everything in `docs/spikes.md`.
-- **Person B:** Task 5 (normalizer, including E11), then 6, 7, 8, 9, then 11 and 12. Test first.
+- **Person B, spike S2:** done. Results and model choices are in `docs/spikes.md`.
+- **Person B:** Tasks 5 and 6 in progress on `b/` branches, then 7, 8, 9, then 11 and 12. Test first.
+- **Database:** Convex replaces Postgres and Neon (Task 15 E20). Person B owns `convex/` and the Convex account. The contract does not touch Convex, so Person A needs no Convex account or setup. The attempt row schema in the interface freeze below is the only shared part. Ignore `DATABASE_URL`, `db/schema.sql` and Docker Postgres wherever earlier plan text mentions them.
 - **Person A:** continue on branch `a/vault-contract` (see Contract status below).
 - **Person A:** spikes S1 (contract-signed BTC testnet tx, plus a false-amount tx that Bitcoin must reject) and S3 (Shade template boots and registers).
 - **Both:** run `npx skills add near/agent-skills` (E18).
