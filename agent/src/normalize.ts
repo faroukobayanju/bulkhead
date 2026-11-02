@@ -26,7 +26,23 @@ const MORSE: Record<string, string> = {
   "-.":"N","---":"O",".--.":"P","--.-":"Q",".-.":"R","...":"S","-":"T","..-":"U","...-":"V",".--":"W","-..-":"X","-.--":"Y","--..":"Z",
   "-----":"0",".----":"1","..---":"2","...--":"3","....-":"4",".....":"5","-....":"6","--...":"7","---..":"8","----.":"9",
 };
-const TOOL = /release[\s_-]?funds/i;
+// The tool name is matched on letters alone, so spacing, punctuation and junk between its letters ("release - funds",
+// "r e l e a s e f u n d s", "release_ funds") cannot hide it. Runs after clean(), so confusables are already folded.
+// Known false-positive class: adjacent words that spell it across a boundary ("press release. Funds raised", "more lease funds").
+const TOOL_LETTERS = "releasefunds";
+const mentions = (s: string) => s.replace(/[^A-Za-z]/g, "").toLowerCase().includes(TOOL_LETTERS);
+// [start, end) of the first mention in `s`, for cutting a bounded segment around it.
+function toolSpan(s: string): [number, number] | null {
+  const letters: string[] = [], at: number[] = [];
+  for (const m of s.matchAll(/[A-Za-z]/g)) { letters.push(m[0].toLowerCase()); at.push(m.index); }
+  const k = letters.join("").indexOf(TOOL_LETTERS);
+  return k < 0 ? null : [at[k]!, at[k + TOOL_LETTERS.length - 1]! + 1];
+}
+// Bounded segment (64 chars before, 128 after) around the first mention in `s`; `s` itself must mention the tool.
+const around = (s: string) => {
+  const [a, b] = toolSpan(s)!;
+  return s.slice(Math.max(0, a - 64), b + 128);
+};
 
 const MAX_DEPTH = 2; // decoding layers: base64(rot13(x)) and base64(base64(x)) are seen, three layers are not
 const MAX_DECODED = 16; // entries returned; tool-name hits are kept first so decoys cannot push them out
@@ -37,8 +53,11 @@ const MAX_VALUE_BYTES = 448;
 
 type Decoded = { kind: "base64" | "hex" | "morse" | "rot13" | "tags"; value: string };
 
+const REPLACEMENT = "\uFFFD";
+// Control characters other than tab/newline/CR.
+const CONTROL = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+/g;
 const PLAIN = /^[\t\n\r\x20-\x7E]+$/; // printable ASCII plus tab/newline/CR
-// Replacement characters (invalid UTF-8) and control characters other than tab/newline/CR.
+// Junk in a lenient decode: replacement characters (invalid UTF-8) and control characters.
 const GARBAGE = /[\uFFFD\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+/;
 
 const readable = (s: string) => s.length >= 8 && (s.match(/[A-Za-z ]/g)?.length ?? 0) / s.length >= 0.6;
@@ -83,10 +102,14 @@ function layer(raw: string): Candidate[] {
 
   // base64: tokens of 4+ alphabet chars, rejoined across whitespace. Prose words can sit in front of the payload and
   // shift its alignment, so decode the run at all four offsets; garbage around the payload turns into replacement
-  // characters and readable()/TOOL decide. The `*` form always matches at its first token, so scanning stays linear.
-  for (const m of text.match(/[A-Za-z0-9+/]{4,}(?:\s+[A-Za-z0-9+/]{4,})*={0,2}/g) ?? []) {
+  // characters and readable()/mentions() decide. The `*` form always matches at its first token, so scanning stays linear.
+  // The run may end in a short tail token (a padded final chunk like "cw=="); no other token under 4 chars joins it.
+  // Each 16+ char token is also decoded alone, so a lone payload beside a prose word survives the word's junk.
+  for (const m of text.match(/[A-Za-z0-9+/]{4,}(?:\s+[A-Za-z0-9+/]{4,})*(?:\s+[A-Za-z0-9+/]{1,3})?={0,2}/g) ?? []) {
     const joined = m.replace(/\s+/g, "");
     if (joined.length >= 16) for (let o = 0; o < 4; o++) add("base64", Buffer.from(joined.slice(o), "base64").toString());
+    const tokens = m.split(/\s+/);
+    if (tokens.length > 1) for (const t of tokens) if (t.length >= 16) add("base64", Buffer.from(t, "base64").toString());
   }
 
   // hex: glued, whitespace/comma separated, 0x- or backslash-x prefixed. Separators and prefixes never overlap the digits,
@@ -108,19 +131,28 @@ function layer(raw: string): Candidate[] {
   }
   // Only the segment around the hit, not the whole message (which NFKC may have expanded).
   const r = rot13(text);
-  const hit = TOOL.exec(r);
-  if (hit && !TOOL.test(text)) add("rot13", r.slice(Math.max(0, hit.index - 64), hit.index + hit[0].length + 128));
+  if (mentions(r) && !mentions(text)) add("rot13", around(r));
   return out;
 }
 
-// The parts of one (cleaned) decode worth reporting. A decode with no junk is judged whole. One with replacement or
-// control characters (a misaligned prefix, or plain noise) is judged by the stretches between the junk, and those must
-// name the tool or be 16+ chars of plain readable ASCII: shorter or non-ASCII fragments of noise pass readable() often
-// enough (about 1% of ordinary sentences) to bury real signals. For the same reason a short decode with non-ASCII
-// characters is not reported. A digit-padded payload still surfaces via TOOL.
+// The parts of one (cleaned) decode worth reporting.
+// - No U+FFFD means valid UTF-8, so any control bytes were put there on purpose (to break words or the tool name):
+//   judge the whole value, reporting it with control runs collapsed to a space and, if that differs, with them removed
+//   (so "prev<ctrl>ious" is also readable as "previous"). Short non-ASCII decodes are not reported (noise passes
+//   readable() often enough to bury real signals).
+// - U+FFFD means invalid bytes, usually a misaligned prefix: judge the stretches between the junk, which must name the
+//   tool or be 16+ chars of plain readable ASCII. If junk splits the tool name itself, report a segment around it.
 function reportable(value: string): string[] {
-  if (!GARBAGE.test(value)) return TOOL.test(value) || (readable(value) && (PLAIN.test(value) || value.length >= 16)) ? [value] : [];
-  return value.split(GARBAGE).filter(f => TOOL.test(f) || (f.length >= 16 && PLAIN.test(f) && readable(f)));
+  // readable() judges the value as decoded, control bytes counting against it: collapsing them to spaces first would
+  // turn noise full of control bytes into "readable" text (random 16-char tokens did, about 1 in 10,000).
+  const ok = (v: string) => mentions(v) || (readable(value) && (PLAIN.test(v) || v.length >= 16));
+  if (!value.includes(REPLACEMENT)) {
+    const spaced = value.replace(CONTROL, " "), stripped = value.replace(CONTROL, "");
+    return (stripped === spaced ? [spaced] : [spaced, stripped]).filter(ok);
+  }
+  const parts = value.split(GARBAGE).filter(f => mentions(f) || (f.length >= 16 && PLAIN.test(f) && readable(f)));
+  if (!mentions(value) || parts.some(mentions)) return parts;
+  return [around(value.replace(GARBAGE, "")), ...parts];
 }
 
 // Recurse into every decoded layer, readable or not (a hex or base64 string wrapping the real payload is unreadable).
@@ -143,14 +175,15 @@ export function normalize(input: string) {
   const all: Decoded[] = [];
   collect(input, 0, all);
   if (all.length) flags.add("encoded_payload");
-  if (TOOL.test(text) || all.some(d => TOOL.test(d.value))) flags.add("tool_name_mention");
+  const tool = new Set(all.filter(d => mentions(d.value)));
+  if (mentions(text) || tool.size) flags.add("tool_name_mention");
 
   // Flags above saw the full values; only now clip what leaves this function.
   const clippedText = clip(text, MAX_TEXT_BYTES);
   if (clippedText.length < text.length) flags.add("truncated");
 
   const decoded = all
-    .sort((a, b) => Number(TOOL.test(b.value)) - Number(TOOL.test(a.value)))
+    .sort((a, b) => Number(tool.has(b)) - Number(tool.has(a)))
     .slice(0, MAX_DECODED)
     .map(d => ({ kind: d.kind, value: clip(d.value, MAX_VALUE_BYTES) }));
   return { text: clippedText, decoded, flags: [...flags] };
