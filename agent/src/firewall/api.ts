@@ -39,7 +39,7 @@ export async function checkFirewall(req: CheckReq, judge: Judge, opts: { timeout
   try {
     // proposed_action args are attacker-controlled text too (a memo field, a base64 blob), so they are scanned and decoded like a
     // message. The tool name is not: it is the agent's own, and the judge reads it.
-    const raw = [...req.messages.map(m => m.content), ...(req.proposed_action ? [JSON.stringify(req.proposed_action.args)] : [])].join("\n");
+    const raw = [...req.messages.map(m => m.content), ...(req.proposed_action ? [argsText(req.proposed_action.args)] : [])].join("\n");
     const n = normalize(raw);
     const h = heuristicScore(n, raw);
     const timeout = new Promise<never>((_, reject) => {
@@ -86,6 +86,11 @@ async function readBody(req: Request, max: number): Promise<Uint8Array | null> {
     chunks.push(value);
   }
 }
+
+// JSON text of the args with its string escapes undone. JSON.stringify writes a newline as the two characters \n, which glue to
+// the next word ("nall") and break every \b rule, and it escapes the quotes of a spoofed {"name":"release_funds"}. After this
+// the text reads like a message. It is no longer valid JSON; it is only scanned.
+const argsText = (args: Record<string, unknown>) => JSON.stringify(args).replace(/\\(?:u[0-9a-fA-F]{4}|[^u])/g, m => JSON.parse(`"${m}"`));
 
 // Returns the cleaned request, or what is wrong with it. Messages and the action are rebuilt from known fields only.
 function parseReq(x: unknown): CheckReq | string {
