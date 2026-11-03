@@ -30,6 +30,7 @@ export const insert = internalMutation({
   args: attemptFields,
   handler: async (ctx, a) => {
     check(a);
+    for (const k of ["signature", "signer"] as const) if (a[k] !== undefined && (a[k].length === 0 || a[k].length > 512)) fail("bad_request", `${k}: empty or over 512 characters`);
     if (await byId(ctx, a.id)) fail("conflict", "id exists");
     await ctx.db.insert("attempts", { ...a, hidden: false });
     // in this transaction: either the row and its counts are written, or none of them
@@ -41,7 +42,7 @@ export const insert = internalMutation({
 
 // The one change to a row after insert: what the release did (or what the rebroadcast loop settled). Nothing else can be edited.
 export const finish = internalMutation({
-  args: { id: v.string(), outcome, reply: v.optional(v.string()), near_tx: v.optional(v.string()), chain_txid: v.optional(v.string()) },
+  args: { id: v.string(), outcome, reply: v.optional(v.string()), near_tx: v.optional(v.string()), chain_txid: v.optional(v.string()), signature: v.optional(v.string()), signer: v.optional(v.string()) },
   handler: async (ctx, a) => {
     const row = await byId(ctx, a.id);
     if (!row) return fail("not_found", "attempt");
@@ -53,8 +54,21 @@ export const finish = internalMutation({
       ...(a.reply !== undefined && { reply: a.reply }),
       ...(a.near_tx !== undefined && { near_tx: a.near_tx }),
       ...(a.chain_txid !== undefined && { chain_txid: a.chain_txid }),
+      ...(a.signature !== undefined && { signature: a.signature }),
+      ...(a.signer !== undefined && { signer: a.signer }),
     });
     return null;
+  },
+});
+
+// The whole stored row (agent only), so the agent can sign the row as it will read after an update.
+export const getFull = internalQuery({
+  args: { id: v.string() },
+  handler: async (ctx, a) => {
+    const row = await byId(ctx, a.id);
+    if (!row) return null;
+    const { _id, _creationTime, ...rest } = row;
+    return rest;
   },
 });
 

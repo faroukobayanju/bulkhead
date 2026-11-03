@@ -63,6 +63,7 @@ describe("a client with no secret cannot write through anything", () => {
     health: {},
     attempt_insert: wireRow(),
     attempt_finish: { id: wireRow().id, outcome: "drained" },
+    attempt_get: { id: wireRow().id },
     attempt_stage: { id: wireRow().id, stage: "done" },
     attempt_report: { attempt_id: wireRow().id, account_hash: H("1") },
     attempts_export: { since: "", cursor: null, limit: 10 },
@@ -101,7 +102,7 @@ describe("a client with no secret cannot write through anything", () => {
 
   test("with the right secret the same bodies are accepted (the 401s above are about the secret and nothing else)", async () => {
     await s.post("attempt_insert", wireRow({ outcome: "releasing", stage: "signing" }));
-    for (const op of ["health", "attempts_export", "key_exists", "signed_tx_get", "counter_get", "attempt_stage"]) {
+    for (const op of ["health", "attempts_export", "key_exists", "signed_tx_get", "counter_get", "attempt_stage", "attempt_get"]) {
       expect((await s.post(op, bodyFor[op])).status, op).toBe(200);
     }
   });
@@ -229,7 +230,7 @@ describe("public queries", () => {
   test("the fields of an attempt are an explicit list", async () => {
     await seed();
     const row = (await s.t.query(api.attempts.get, { id: idN(1) })) as Record<string, unknown>;
-    expect(Object.keys(row).sort()).toEqual(["chain_txid", "fw_a", "fw_b", "id", "message", "near_tx", "outcome", "payout", "reply", "stage", "technique", "tier", "tool_called", "ts"]);
+    expect(Object.keys(row).sort()).toEqual(["chain_txid", "fw_a", "fw_b", "id", "message", "near_tx", "outcome", "payout", "reply", "response_verified", "signature", "signer", "stage", "technique", "tier", "tool_called", "ts"]);
   });
 
   test("nothing private comes back from any public query: not as a key, and not as a value", async () => {
@@ -269,7 +270,7 @@ describe("public queries", () => {
     const out = publicAttempt(doc);
     expect(text(out)).not.toContain("SECRET-REASON");
     expect(Object.keys(out.fw_a!).sort()).toEqual(["degraded", "firewall_version", "risk", "technique", "verdict"]);
-    expect(Object.keys(out).sort()).toEqual(["chain_txid", "fw_a", "fw_b", "id", "message", "near_tx", "outcome", "payout", "reply", "stage", "technique", "tier", "tool_called", "ts"]);
+    expect(Object.keys(out).sort()).toEqual(["chain_txid", "fw_a", "fw_b", "id", "message", "near_tx", "outcome", "payout", "reply", "response_verified", "signature", "signer", "stage", "technique", "tier", "tool_called", "ts"]);
   });
 
   test("a hidden row is returned by no public query", async () => {

@@ -15,6 +15,7 @@ export const OPS: Record<string, ReturnType<typeof op>> = {
   health: op("records:ping", records.ping),
   attempt_insert: op("attempts:insert", attempts.insert),
   attempt_finish: op("attempts:finish", attempts.finish),
+  attempt_get: op("attempts:getFull", attempts.getFull),
   attempt_stage: op("attempts:setStage", attempts.setStage),
   attempt_report: op("attempts:report", attempts.report),
   attempts_export: op("attempts:exportPage", attempts.exportPage),

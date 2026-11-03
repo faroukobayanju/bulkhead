@@ -3,30 +3,14 @@
 // firewall `reason` (the next day's dataset publishes full reasons). A new column stays private until it is added below.
 import type { DocumentByName } from "convex/server";
 import type { DataModel } from "./server";
+import { attemptView } from "../../shared/attempt-view";
 
 type Attempt = DocumentByName<DataModel, "attempts">;
-type Fw = Attempt["fw_a"];
 
-// Picked field by field, so a key the stored object happens to carry (a reason, however nested) cannot come along.
-const fw = (x: Fw) => (x ? { verdict: x.verdict, risk: x.risk, technique: x.technique, firewall_version: x.firewall_version, degraded: x.degraded } : null);
-
-// Only a winner's payout address is shown, shortened: it is on-chain anyway. A near miss never paid, so its address stays private.
-const SHOWS_PAYOUT = new Set(["drained", "signed_pending_broadcast"]);
-const short = (a: string) => (a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-3)}` : null);
-
+// The shared view (what the agent signs) plus stage, and the signature that goes with it. Old rows have none: null.
 export const publicAttempt = (d: Attempt) => ({
-  id: d.id,
-  ts: d.ts,
-  tier: d.tier,
-  outcome: d.outcome,
+  ...attemptView(d),
   stage: d.stage,
-  message: d.message,
-  reply: d.reply,
-  technique: d.technique,
-  tool_called: d.tool_called,
-  fw_a: fw(d.fw_a),
-  fw_b: fw(d.fw_b),
-  near_tx: d.near_tx,
-  chain_txid: d.chain_txid,
-  payout: SHOWS_PAYOUT.has(d.outcome) ? short(d.payout_address) : null,
+  signature: d.signature ?? null,
+  signer: d.signer ?? null,
 });

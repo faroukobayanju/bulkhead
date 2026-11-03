@@ -1,10 +1,12 @@
 // The agent's side of the database (E20): every call is POST /agent/<op> on the Convex site with x-agent-secret, through an
 // injected fetch. Account and IP are hashed here with PEPPER, so Convex only ever sees hashes. There is no Postgres.
 import { createHash } from "node:crypto";
+import { attemptView } from "../../shared/attempt-view";
 import { attemptLeaf } from "../../shared/leaf";
 import type { Outcome, Stage } from "../../shared/attempt";
 import type { Counter } from "./counter";
 import type { FirewallResult } from "./firewall/api";
+import { signResponse, type Sign } from "./firewall/verdict";
 
 // What the pipeline hands over: raw account and ip, which never leave this file.
 export type AttemptRow = {
@@ -31,6 +33,7 @@ export type AttemptRow = {
   consent_version: string;
   reply: string;
   stage: Stage;
+  response_verified?: boolean; // E17: every model response of the attempt had a signature that checked out; absent counts as false
 };
 export type AttemptPatch = { outcome: Outcome; reply?: string; near_tx?: string; chain_txid?: string };
 
@@ -49,7 +52,8 @@ const wf = (s: string) => s.toWellFormed();
 const fw = (x: FirewallResult | null | undefined) => (x ? { ...Object.fromEntries(FW_KEYS.map(k => [k, x[k]])), reason: wf(x.reason) } : null);
 const LOCAL = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
-export function makeDb(o: { fetch: typeof fetch; siteUrl: string; secret: string; pepper: string; timeoutMs?: number }) {
+// `signer` (E5): when set, every row is signed on insert and again on every outcome change, with the key that signs verdicts.
+export function makeDb(o: { fetch: typeof fetch; siteUrl: string; secret: string; pepper: string; timeoutMs?: number; signer?: { id: string; sign: Sign } }) {
   // A short or missing pepper makes the hashes of NEAR accounts and IPv4 addresses easy to reverse: the agent does not start.
   if (typeof o.pepper !== "string" || o.pepper.length < 16) throw new Error("PEPPER is required (at least 16 characters, 32+ random bytes in production)");
   if (!o.secret) throw new Error("AGENT_SECRET is required");
@@ -95,6 +99,13 @@ export function makeDb(o: { fetch: typeof fetch; siteUrl: string; secret: string
   };
   const bool = (x: unknown) => x === true;
 
+  // ed25519 over sha256(canonical JSON of the public row without stage, with `signer` inside): see shared/attempt-view.ts.
+  const seal = async (v: Parameters<typeof attemptView>[0]) => {
+    if (!o.signer) return {};
+    const { signature, signer } = await signResponse(attemptView(v), o.signer.id, o.signer.sign);
+    return { signature, signer };
+  };
+
   const counter: Counter = {
     get: async key => num("counter_get", await call("counter_get", { key })),
     async add(key, n, cap) {
@@ -114,6 +125,7 @@ export function makeDb(o: { fetch: typeof fetch; siteUrl: string; secret: string
       const account_hash = hash(r.account);
       const message = wf(r.message);
       const leaf = attemptLeaf({ id: r.id, ts: r.ts, tier: r.tier, account_hash, message, outcome: r.outcome, prompt_sha256: r.prompt_sha256, model_id: r.model_id, attestation_sha256: r.attestation_sha256, codehash: r.codehash });
+      const sealed = await seal({ ...r, message, reply: wf(r.reply), response_verified: r.response_verified ?? false });
       await call("attempt_insert", {
         id: r.id,
         ts: r.ts,
@@ -139,12 +151,20 @@ export function makeDb(o: { fetch: typeof fetch; siteUrl: string; secret: string
         reply: wf(r.reply),
         stage: r.stage,
         leaf,
+        response_verified: r.response_verified ?? false,
+        ...sealed,
       });
     },
 
     async updateAttempt(id: string, p: AttemptPatch) {
       const { outcome, reply, near_tx, chain_txid } = p;
-      await call("attempt_finish", { id, outcome, ...(reply !== undefined && { reply: wf(reply) }), ...(near_tx !== undefined && { near_tx }), ...(chain_txid !== undefined && { chain_txid }) });
+      let sealed = {};
+      if (o.signer) {
+        // sign the row as it will read after this update, from what is stored
+        const cur = (await call("attempt_get", { id })) as Record<string, any> | null;
+        if (cur) sealed = await seal({ ...cur, outcome, reply: reply !== undefined ? wf(reply) : cur.reply, near_tx: near_tx !== undefined ? near_tx : cur.near_tx, chain_txid: chain_txid !== undefined ? chain_txid : cur.chain_txid } as never);
+      }
+      await call("attempt_finish", { id, outcome, ...(reply !== undefined && { reply: wf(reply) }), ...(near_tx !== undefined && { near_tx }), ...(chain_txid !== undefined && { chain_txid }), ...sealed });
     },
     // false: nothing changed (the row does not exist yet, or the stage is not forward of the stored one)
     async setStage(id: string, stage: Stage) {

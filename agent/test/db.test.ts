@@ -168,7 +168,7 @@ describe("insertAttempt", () => {
   test("sends exactly the columns the schema has, ignoring anything extra on the row", async () => {
     const body = await sent({ ...row(), extra: "x", hidden: true, password: "p" } as AttemptRow);
     expect(Object.keys(body).sort()).toEqual(
-      ["account_hash", "attestation_sha256", "chain_txid", "codehash", "consent_version", "fw_a", "fw_b", "id", "ip_hash", "leaf", "llm_output", "message", "model_id", "near_tx", "normalized", "outcome", "payout_address", "prompt_sha256", "reply", "stage", "technique", "tier", "tool_called", "ts"],
+      ["account_hash", "attestation_sha256", "chain_txid", "codehash", "consent_version", "fw_a", "fw_b", "id", "ip_hash", "leaf", "llm_output", "message", "model_id", "near_tx", "normalized", "outcome", "payout_address", "prompt_sha256", "reply", "response_verified", "stage", "technique", "tier", "tool_called", "ts"],
     );
   });
 

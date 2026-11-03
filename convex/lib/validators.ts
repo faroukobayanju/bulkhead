@@ -52,4 +52,10 @@ export const attemptFields = {
   reply: v.string(), // the outcome copy the player sees, so a subscriber can show the result
   stage,
   leaf: v.string(), // E7: written once at insert, never updated
+  // E5 and E17, optional so older rows stay valid. signature: ed25519 over the canonical public row (shared/attempt-view.ts) by the
+  // agent key `signer`, rewritten whenever the outcome changes. response_verified: every model response of the attempt carried a
+  // signature that checked out against the attested signer.
+  signature: v.optional(v.string()),
+  signer: v.optional(v.string()),
+  response_verified: v.optional(v.boolean()),
 };
