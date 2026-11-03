@@ -43,10 +43,11 @@ export async function assembleSigned(unsignedHex: string, sig: Sig, tierAddress:
   throw new Error("signature does not recover to the tier address");
 }
 
-export function makeBase(o: { fetch: typeof fetch; rpcUrl: string; usdc: string; timeoutMs?: number }) {
+export function makeBase(o: { fetch: typeof fetch; rpcUrl: string; timeoutMs?: number }) {
   const client = createPublicClient({ transport: http(o.rpcUrl, { fetchFn: o.fetch, timeout: o.timeoutMs ?? 10_000, retryCount: 0 }) });
   return {
-    usdcBalance: (addr: string) => client.readContract({ address: o.usdc as Hex, abi: ERC20, functionName: "balanceOf", args: [addr as Hex] }),
+    // the token address is the tier's own (get_tier.evm.usdc), never configuration
+    usdcBalance: (addr: string, usdc: string) => client.readContract({ address: usdc as Hex, abi: ERC20, functionName: "balanceOf", args: [addr as Hex] }),
     // pending: a tx of the tier address that is still in the mempool owns the next nonce too
     nonce: (addr: string) => client.getTransactionCount({ address: addr as Hex, blockTag: "pending" }),
     /** Current fees, clamped to what the contract accepts. */

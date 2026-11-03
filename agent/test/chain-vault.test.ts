@@ -56,7 +56,7 @@ function near(o: Partial<Near> = {}) {
   const f = (async (_url: string, init: RequestInit) => {
     const req = JSON.parse(init.body as string);
     calls.push({ method: req.method, params: req.params });
-    const reply = (x: unknown) => new Response(JSON.stringify(x !== null && typeof x === "object" && "error" in (x as object) ? { jsonrpc: "2.0", id: req.id, ...(x as object) } : { jsonrpc: "2.0", id: req.id, result: x }));
+    const reply = (x: unknown) => new Response(JSON.stringify(x !== null && typeof x === "object" && typeof (x as any).error === "object" ? { jsonrpc: "2.0", id: req.id, ...(x as object) } : { jsonrpc: "2.0", id: req.id, result: x }));
     const p = req.params;
     if (req.method === "query" && p.request_type === "call_function") {
       const args = JSON.parse(Buffer.from(p.args_base64, "base64").toString());
@@ -79,7 +79,7 @@ function near(o: Partial<Near> = {}) {
 // the contract call a sent tx carries
 const call = (t: transactions.SignedTransaction) => {
   const fc = t.transaction.actions[0]!.functionCall!;
-  return { method: fc.methodName, gas: fc.gas, deposit: fc.deposit, args: JSON.parse(Buffer.from(fc.args).toString()), receiver: t.transaction.receiverId, signer: t.transaction.signerId, nonce: t.transaction.nonce };
+  return { method: fc.methodName, gas: fc.gas, deposit: fc.deposit, args: JSON.parse(Buffer.from(fc.args).toString()), receiver: t.transaction.receiverId, signer: t.transaction.signerId, nonce: Number(t.transaction.nonce) };
 };
 
 // ---- what the contract would emit for a BTC release ----
@@ -101,11 +101,13 @@ const evmTx = {
   to: "0x036CbD53842c5426634e7929541eC2318f3dCF7e" as Hex, value: 0n,
   data: encodeFunctionData({ abi: parseAbi(["function transfer(address,uint256)"]), functionName: "transfer", args: [EVM_RECIPIENT, 30_000_000n] }),
 };
-async function evmSigned(attempt = ATTEMPT) {
+async function evmSignedLogs(attempt = ATTEMPT) {
   const unsigned = serializeTransaction(evmTx);
   const s = await evmSign({ hash: keccak256(unsigned), privateKey: ("0x" + "11".repeat(32)) as Hex });
   return [ev("release_signed", { tier: 2, attempt_id: attempt, unsigned_tx_hex: unsigned.slice(2), signature: { big_r: { affine_point: "02" + s.r.slice(2) }, s: { scalar: s.s.slice(2) }, recovery_id: s.yParity } })];
 }
+
+const EVM_LOGS = await evmSignedLogs();
 
 // ---- adapters ----
 function btcStub(o: Partial<{ utxos: any[]; fee: number; broadcast: (hex: string) => Promise<string> }> = {}) {
@@ -137,7 +139,7 @@ function baseNode(o: { balance?: bigint; eth?: bigint; sendErr?: string } = {}) 
       return new Response(JSON.stringify({ jsonrpc: "2.0", id: r.id, error: { code: -32000, message: (e as Error).message } }));
     }
   }) as unknown as typeof fetch;
-  return { base: makeBase({ fetch: f, rpcUrl: "https://base.test", usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e" }), calls };
+  return { base: makeBase({ fetch: f, rpcUrl: "https://base.test" }), calls };
 }
 
 function rig(nearOpts: Partial<Near> = {}, vo: Partial<VaultOpts> = {}, btcOpts: Parameters<typeof btcStub>[0] = {}, baseOpts: Parameters<typeof baseNode>[0] = {}) {
@@ -245,25 +247,21 @@ describe("release, Bitcoin", () => {
 
 describe("release, Base", () => {
   test("payload from the chain: full balance up to the cap, fees under the contract's, gas limit under 120k", async () => {
-    const r = rig({ tier: baseTier(), tx: async () => txResult(await evmSigned()) } as any, {}, {}, { balance: 50_000_000n });
-    // tx returns a promise-free value: build it first
-    const logs = await evmSigned();
-    const r2 = rig({ tier: baseTier(), tx: () => txResult(logs) }, {}, {}, { balance: 50_000_000n });
-    const out = await r2.vault.release(2, ATTEMPT, EVM_RECIPIENT);
-    const p = call(r2.sentTxs[0]!).args.payload.Base;
+    const r = rig({ tier: baseTier(), tx: () => txResult(EVM_LOGS) }, {}, {}, { balance: 50_000_000n });
+    const out = await r.vault.release(2, ATTEMPT, EVM_RECIPIENT);
+    const p = call(r.sentTxs[0]!).args.payload.Base;
     expect(p.usdc_amount).toBe("30000000"); // min(balance, max_release)
     expect(p.nonce).toBe(7);
     expect(BigInt(p.max_fee_per_gas)).toBeLessThanOrEqual(50_000_000_000n);
     expect(p.gas_limit).toBeLessThanOrEqual(120_000);
-    expect(call(r2.sentTxs[0]!).gas).toBe(300_000_000_000_000n);
+    expect(call(r.sentTxs[0]!).gas).toBe(300_000_000_000_000n);
     expect(out.chainTxid).toBe("0x" + "ab".repeat(32));
-    expect(r2.stored[0]!.chain).toBe("evm");
-    void r;
+    expect(r.stored[0]!.chain).toBe("evm");
   });
 
   test("a balance under the cap is paid in full", async () => {
-    const r = rig({ tier: baseTier(), tx: () => txResult(await_(evmSigned)) }, {}, {}, { balance: 12_345n });
-    await r.vault.release(2, ATTEMPT, EVM_RECIPIENT).catch(() => {});
+    const r = rig({ tier: baseTier(), tx: () => txResult(EVM_LOGS) }, {}, {}, { balance: 12_345n });
+    await settle(r.vault.release(2, ATTEMPT, EVM_RECIPIENT));
     expect(call(r.sentTxs[0]!).args.payload.Base.usdc_amount).toBe("12345");
   });
 
@@ -280,16 +278,11 @@ describe("release, Base", () => {
   });
 
   test("an EVM broadcast failure after signing is BroadcastFailedError", async () => {
-    const logs = await evmSigned();
-    const r = rig({ tier: baseTier(), tx: () => txResult(logs) }, {}, {}, { sendErr: "rpc down" });
+    const r = rig({ tier: baseTier(), tx: () => txResult(EVM_LOGS) }, {}, {}, { sendErr: "rpc down" });
     expect(((await settle(r.vault.release(2, ATTEMPT, EVM_RECIPIENT))) as { e: Error }).e).toBeInstanceOf(BroadcastFailedError);
     expect(r.stored).toHaveLength(1);
   });
 });
-// the Base test above that needs async logs inside a sync fake
-function await_(_f: () => Promise<string[]>): string[] {
-  return [];
-}
 
 describe("release, contract errors", () => {
   // the codes the pipeline records as release_failed and alerts on (contract strings, lib.rs / btc.rs / evm.rs)

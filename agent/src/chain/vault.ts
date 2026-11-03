@@ -4,13 +4,18 @@
 // has signed, a failure is a BroadcastFailedError: the tier is paid on-chain and the rebroadcast loop settles it.
 // No env here: every setting, and the agent's signing key, comes in as an argument.
 import { createHash } from "node:crypto";
+import type { Counter } from "../counter";
+import type { Config } from "../config";
+import type { Tier } from "../llm";
 import { bytesToHex } from "@noble/hashes/utils";
-import { transactions, utils } from "near-api-js";
+import { KeyPair, transactions, utils } from "near-api-js";
 import { BroadcastFailedError, type TierState } from "../pipeline";
 import type { Hrp } from "../address";
 import type { Base } from "./base";
 import { GAS_LIMIT, assembleSigned as assembleEvm } from "./base";
-import { assembleSigned as assembleBtc, pickUtxo, tierAddress, tierPubkey, type Btc } from "./btc";
+import { assembleSigned as assembleBtc, makeBtc, pickUtxo, tierAddress, tierPubkey, type Btc } from "./btc";
+import { makeBase } from "./base";
+import { startRebroadcast, type Payout } from "./rebroadcast";
 
 const RELEASE_GAS = 300n * 10n ** 12n; // E14b: never max gas, it reserves more than the key's allowance
 const ROOTS_GAS = 30n * 10n ** 12n;
@@ -56,6 +61,7 @@ export type TierInfo = {
   cooldown_s: number;
   rounds_left: number;
   cooldown_until_ns: number;
+  evm: { chain_id: number; usdc: string } | null;
 };
 const statusOf = (t: TierInfo) => (typeof t.status === "string" ? t.status : Object.keys(t.status)[0]!);
 const attemptOf = (t: TierInfo) => (typeof t.status === "string" ? undefined : Object.values(t.status)[0]!.attempt_id);
@@ -178,7 +184,8 @@ export function makeVault(o: VaultOpts) {
       return { derived, body: { Bitcoin: { utxos: [u], fee_rate_sat_vb: fee } } };
     }
     if (!base) throw new Error("no Base client configured");
-    const [bal, nonce, fees] = await Promise.all([base.usdcBalance(t.address), base.nonce(t.address), base.fees()]);
+    if (!t.evm) throw new Error("Base tier has no evm config");
+    const [bal, nonce, fees] = await Promise.all([base.usdcBalance(t.address, t.evm?.usdc ?? ""), base.nonce(t.address), base.fees()]);
     const amount = bal < max ? bal : max;
     if (amount === 0n) throw new ContractRefusedError("ERR_NO_UTXOS");
     await base.checkGas(t.address, GAS_LIMIT, fees.maxFeePerGas); // NoGasFundsError
@@ -271,6 +278,7 @@ export function makeVault(o: VaultOpts) {
 
   // E22: only a FullAccess key may log in as the account. An RPC failure throws; false means the RPC said the key is not there
   // or is a FunctionCall key.
+  // ponytail: kept for tests and tools; the server's login check is accesskey.ts
   async function viewAccessKey(accountId: string, publicKey: string): Promise<boolean> {
     let r: any;
     try {
@@ -303,3 +311,58 @@ export function makeVault(o: VaultOpts) {
   };
 }
 export type Vault = ReturnType<typeof makeVault>;
+
+// The ChainDeps of server.ts, built from the agent's config (src/main.ts loads this by name). The signing key is the testnet
+// AGENT_PRIVATE_KEY; in the TEE the Shade Agent API supplies a `signer` instead (Task 10).
+type ChainDb = {
+  putSignedTx(r: { attempt_id: string; chain: "btc" | "evm"; hex: string }): Promise<boolean>;
+  getSignedTx(id: string): Promise<{ chain: "btc" | "evm"; hex: string } | null>;
+  updateAttempt(id: string, p: { outcome: Payout["outcome"] | "drained" | "release_failed" | "broadcast_failed_terminal"; chain_txid?: string }): Promise<void>;
+  listAttempts(since: string, cursor: string | null, limit?: number): Promise<{ rows: Record<string, unknown>[]; next: string; done: boolean }>;
+  counter: Counter;
+};
+const PAYOUT_LOOKBACK_MS = 14 * 24 * 3600_000; // ponytail: a payout stuck for more than 14 days drops off the work list; add an outcome index query if that matters
+
+export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier) => void; fetch?: typeof fetch; signer?: Signer; clock?: () => number }) {
+  const f = x.fetch ?? fetch;
+  const kp = cfg.agentPrivateKey ? KeyPair.fromString(cfg.agentPrivateKey as never) : null;
+  const signer = x.signer ?? (kp ? { publicKey: kp.getPublicKey().toString(), sign: async (m: Uint8Array) => kp.sign(m).signature } : null);
+  if (!signer) throw new Error("no agent signing key");
+  const btc = makeBtc({ fetch: f, base: cfg.mempoolBase });
+  const base = cfg.baseRpc ? makeBase({ fetch: f, rpcUrl: cfg.baseRpc }) : undefined;
+  const vault = makeVault({
+    fetch: f, rpcUrl: cfg.nearRpc, vaultAccount: cfg.vaultAccount, agentAccount: cfg.agentAccount, hrp: cfg.btcHrp, signer, btc, base,
+    signerAccount: cfg.network === "mainnet" ? "v1.signer" : "v1.signer-prod.testnet",
+    storeSignedTx: r => x.db.putSignedTx(r), clock: x.clock,
+  });
+  const clock = x.clock ?? Date.now;
+  return {
+    release: (tier: Tier, attemptId: string, recipient: string) => vault.release(tier, attemptId, recipient),
+    tierOpen: (tier: Tier) => vault.tierOpen(tier),
+    wasSigned: (tier: Tier, attemptId: string) => vault.wasSigned(tier, attemptId),
+    storeSignedTx: async (attemptId: string, chain: "btc" | "evm", hex: string) => void (await x.db.putSignedTx({ attempt_id: attemptId, chain, hex })),
+    logAttemptRoots: vault.logAttemptRoots,
+    /** Starts the rebroadcast loop in this process; returns the stop function. */
+    startRebroadcast: (o: { alert: (kind: string, details: Record<string, unknown>) => void | Promise<void>; intervalMs?: number; warn?: (what: string, id: string, e: unknown) => void }) =>
+      startRebroadcast({
+        ...o,
+        clock,
+        onSettled: x.onSettled,
+        pendingTx: vault.pendingTx,
+        signedTx: id => x.db.getSignedTx(id),
+        update: (id, patch) => x.db.updateAttempt(id, patch as never),
+        failures: x.db.counter,
+        broadcast: (chain, hex) => (chain === "btc" ? btc.broadcast(hex) : base!.broadcast(hex)),
+        payouts: async () => {
+          const since = new Date(clock() - PAYOUT_LOOKBACK_MS).toISOString();
+          const out: Payout[] = [];
+          for (let cursor: string | null = null; ; ) {
+            const pg = await x.db.listAttempts(since, cursor);
+            for (const r of pg.rows) if (r.outcome === "releasing" || r.outcome === "signed_pending_broadcast") out.push({ id: r.id as string, tier: r.tier as 1 | 2 | 3, outcome: r.outcome, ts: r.ts as string, near_tx: (r.near_tx as string | null) ?? null });
+            if (pg.done) return out;
+            cursor = pg.next;
+          }
+        },
+      }),
+  };
+}

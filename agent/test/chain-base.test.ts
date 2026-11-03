@@ -81,13 +81,13 @@ function node(over: Record<string, (params: any[]) => unknown> = {}) {
       return new Response(JSON.stringify({ jsonrpc: "2.0", id: req.id, error: { code: -32000, message: (e as Error).message } }));
     }
   }) as unknown as typeof fetch;
-  return { f, calls, base: () => makeBase({ fetch: f, rpcUrl: "https://base.test", usdc: USDC }) };
+  return { f, calls, base: () => makeBase({ fetch: f, rpcUrl: "https://base.test", }) };
 }
 
 describe("reads", () => {
   test("usdcBalance calls balanceOf on the USDC contract", async () => {
     const n = node();
-    expect(await n.base().usdcBalance(TO)).toBe(50_000_000n);
+    expect(await n.base().usdcBalance(TO, USDC)).toBe(50_000_000n);
     const call = n.calls.find(c => c.method === "eth_call")!;
     expect(call.params[0].to.toLowerCase()).toBe(USDC.toLowerCase());
     expect(call.params[0].data ?? call.params[0].input).toMatch(/^0x70a08231/);
