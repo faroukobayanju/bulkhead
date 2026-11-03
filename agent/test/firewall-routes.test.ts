@@ -43,7 +43,7 @@ function setup(o: { limits?: object; judge?: Judge; keys?: (k: string) => Promis
       ...(body instanceof ReadableStream ? { duplex: "half" } : {}),
     } as RequestInit);
   const withKey = (body: Body = MSG, key = KEY_A) => post(body, { "x-api-key": key });
-  const playground = (body: Body = MSG, ip = "203.0.113.7", secret = SECRET) => post(body, { "x-drainme-proxy-secret": secret, "x-real-ip": ip });
+  const playground = (body: Body = MSG, ip = "203.0.113.7", secret = SECRET) => post(body, { "x-bulkhead-proxy-secret": secret, "x-real-ip": ip });
   return { app, post, withKey, playground, clock, counter, seen, budget };
 }
 type Body = string | ReadableStream | object;
@@ -190,7 +190,7 @@ describe("playground", () => {
 
   test("a valid secret and no x-real-ip is 400; so is a value that is not an IP", async () => {
     const s = setup();
-    const none = await s.post(MSG, { "x-drainme-proxy-secret": SECRET });
+    const none = await s.post(MSG, { "x-bulkhead-proxy-secret": SECRET });
     expect(none.status).toBe(400);
     expect(await errCode(none)).toBe("bad_client_ip");
     for (const ip of ["not-an-ip", "1.2.3", "999.1.1.1", "1.1.1.1, 2.2.2.2", " "]) expect((await s.playground(MSG, ip)).status).toBe(400);
@@ -251,7 +251,7 @@ describe("playground", () => {
 
   test("an API key from the same proxy is treated as an API key, not a playground call", async () => {
     const s = setup();
-    for (let i = 0; i < 6; i++) expect((await s.post(MSG, { "x-api-key": KEY_A, "x-drainme-proxy-secret": SECRET, "x-real-ip": "203.0.113.7" })).status).toBe(200);
+    for (let i = 0; i < 6; i++) expect((await s.post(MSG, { "x-api-key": KEY_A, "x-bulkhead-proxy-secret": SECRET, "x-real-ip": "203.0.113.7" })).status).toBe(200);
   });
 });
 

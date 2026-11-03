@@ -2,8 +2,8 @@
 import { sha256 } from "@noble/hashes/sha2";
 import { concatBytes } from "@noble/hashes/utils";
 
-export const LOGIN_MESSAGE = "drainme-login";
-export const LOGIN_RECIPIENT = "drainme.app";
+export const LOGIN_MESSAGE = "bulkhead-login";
+export const LOGIN_RECIPIENT = "bulkhead";
 
 const TAG = 2147484061; // 2^31 + 413
 const utf8 = new TextEncoder();
