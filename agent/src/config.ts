@@ -52,7 +52,7 @@ export const ENV_DOC: readonly (readonly [name: string, need: string, what: stri
   ["VAULT_ACCOUNT", "required unless MOCK_LLM", "the vault contract account, e.g. bulkhead-vault.<team>.testnet"],
   ["AGENT_ACCOUNT", "required unless MOCK_LLM", "the agent's NEAR account (the verdict signer)"],
   ["AGENT_PRIVATE_KEY", "testnet only", "ed25519:... key of the agent; in the TEE it comes from the Shade Agent API, never from env"],
-  ["NEARAI_BASE", "optional", "NEAR AI gateway, defaults to config/agent.json (https://cloud-api.near.ai/v1)"],
+  ["NEARAI_BASE", "optional, testnet only", "NEAR AI gateway, defaults to config/agent.json (https://cloud-api.near.ai/v1); mainnet refuses any other value"],
   ["NEARAI_API_KEY", "required unless MOCK_LLM", "NEAR AI Cloud key, with a spending limit set in its dashboard"],
   ["TIER_MODEL_1", "optional", "tier 1 model, defaults to config/agent.json and must equal the model the agent calls"],
   ["TIER_MODEL_2", "optional", "tier 2 model, same rule"],
@@ -69,7 +69,7 @@ export const ENV_DOC: readonly (readonly [name: string, need: string, what: stri
   ["TIER_ENABLED_1", "optional", "1 (default) or 0"],
   ["TIER_ENABLED_2", "optional", "1 (default) or 0"],
   ["TIER_ENABLED_3", "optional", "1 (default) or 0"],
-  ["CODEHASH", "required on mainnet", "measured image hash reported by /attestation; testnet and mock default to local"],
+  ["CODEHASH", "required unless MOCK_LLM", "measured image hash reported by /attestation and in every verdict; mock defaults to local, nothing else does"],
   ["FIREWALL_VERSION", "required on mainnet", "firewall version reported in every verdict; testnet and mock default to fw-v1"],
   ["SITE_URL", "required on mainnet", "public site, the base of docs_url in error bodies"],
   ["ALERT_WEBHOOK_URL", "optional", "https URL that receives operator alerts; unset means no alerts"],
@@ -169,8 +169,8 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     mempoolBase: need("MEMPOOL_BASE", live),
     baseRpc: need("BASE_RPC", live && tierEnabled[2]),
     tierEnabled,
-    // No "local" fallback where a real measurement is expected: a production agent that cannot say what it runs does not start.
-    codehash: dev ? (get("CODEHASH") ?? "local") : need("CODEHASH"),
+    // No "local" fallback outside mock mode: an agent that cannot say what it runs does not start, testnet included.
+    codehash: mock ? (get("CODEHASH") ?? "local") : need("CODEHASH"),
     firewallVersion: dev ? (get("FIREWALL_VERSION") ?? "fw-v1") : need("FIREWALL_VERSION"),
     siteUrl: (dev ? get("SITE_URL") ?? "" : need("SITE_URL")).replace(/\/+$/, ""),
     alertWebhookUrl: get("ALERT_WEBHOOK_URL"),
@@ -182,6 +182,15 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     btcHrp: network === "mainnet" ? "bc" : "tb",
   };
   url("NEARAI_BASE", c.nearaiBase, true);
+  if (nw === "mainnet" && c.nearaiBase !== cfg.nearai_base) bad.push("NEARAI_BASE may not be overridden on mainnet: attestation is only meaningful against the baked gateway");
+  // the Convex secret travels in every request: https, with http only for a local dev backend on testnet
+  try {
+    const u = new URL(c.convexSiteUrl);
+    const local = ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+    if (u.protocol !== "https:" && !(u.protocol === "http:" && local && nw === "testnet")) bad.push("CONVEX_SITE_URL must be an https URL (http only for localhost on testnet)");
+  } catch {
+    if (c.convexSiteUrl) bad.push("CONVEX_SITE_URL must be a URL");
+  }
   url("NEAR_RPC", c.nearRpc, false);
   url("MEMPOOL_BASE", c.mempoolBase, true);
   url("BASE_RPC", c.baseRpc, false);

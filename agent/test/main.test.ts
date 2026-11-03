@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { loadMock, mockChain } from "../src/mock";
+import { KeyPair } from "near-api-js";
 import { start } from "../src/main";
 
 const S = (c: string) => c.repeat(32);
@@ -30,7 +31,7 @@ describe("mock mode fixtures", () => {
 
 describe("start()", () => {
   test("mock mode serves /health and /attestation with real wiring", async () => {
-    const http = await start(env, () => {});
+    const { http, stop } = await start(env, () => {});
     try {
       expect(await (await fetch(`http://localhost:${http.port}/health`)).json()).toEqual({ ok: true, mock: true });
       const a: any = await (await fetch(`http://localhost:${http.port}/attestation`, { headers: { "x-bulkhead-proxy-secret": S("d") } })).json();
@@ -38,8 +39,39 @@ describe("start()", () => {
       expect(a.checksum).toMatch(/^[0-9a-f]{64}$/);
       expect((await fetch(`http://localhost:${http.port}/attempt`, { method: "POST", body: "{}" })).status).toBe(403);
     } finally {
-      await http.stop(true);
+      await stop();
     }
+  });
+  test("outside mock mode: real wiring starts, the rebroadcast loop runs in-process and stops with the server", async () => {
+    const calls: string[] = [];
+    const fakeFetch = (async (url: string) => {
+      calls.push(String(url));
+      const op = /\/agent\/(\w+)/.exec(String(url))?.[1];
+      return new Response(JSON.stringify({ result: op === "attempts_export" ? { rows: [], next: "", done: true } : null }));
+    }) as unknown as typeof fetch;
+    const live = {
+      ...env, MOCK_LLM: undefined, PORT: "38788", CONVEX_SITE_URL: "https://x.convex.site", NEAR_RPC: "https://rpc.testnet.near.org", VAULT_ACCOUNT: "v.testnet", AGENT_ACCOUNT: "a.testnet",
+      AGENT_PRIVATE_KEY: KeyPair.fromRandom("ed25519").toString(), NEARAI_API_KEY: "k", MEMPOOL_BASE: "https://mempool.space/testnet4/api", BASE_RPC: "https://sepolia.base.org", CODEHASH: "cd".repeat(32),
+    };
+    const { http, stop } = await start(live, () => {}, { fetch: fakeFetch, rebroadcastMs: 15 });
+    const base = `http://localhost:${http.port}`;
+    const hdr = { "x-bulkhead-proxy-secret": S("d") };
+    const a: any = await (await fetch(`${base}/attestation`, { headers: hdr })).json();
+    expect(a).toMatchObject({ mock: false, codehash: "cd".repeat(32) });
+    expect(a.verification.verified.length).toBeGreaterThan(0);
+    expect((await fetch(`${base}/attestation`)).status).toBe(403);
+    for (let i = 0; i < 100 && !calls.some(u => u.includes("/agent/attempts_export")); i++) await Bun.sleep(5);
+    expect(calls.some(u => u.includes("/agent/attempts_export"))).toBe(true); // the loop reached Convex for its work list
+    await stop();
+    await Bun.sleep(5);
+    const n = calls.length;
+    await Bun.sleep(60);
+    expect(calls.length).toBe(n); // stopped
+  });
+  test("outside mock mode a missing codehash or signing key stops startup", async () => {
+    const base = { ...env, MOCK_LLM: undefined, PORT: "38789", NEAR_RPC: "https://rpc.testnet.near.org", VAULT_ACCOUNT: "v.testnet", AGENT_ACCOUNT: "a.testnet", NEARAI_API_KEY: "k", MEMPOOL_BASE: "https://mempool.space/testnet4/api", BASE_RPC: "https://sepolia.base.org", CODEHASH: "cd".repeat(32) };
+    await expect(start({ ...base, CODEHASH: undefined }, () => {})).rejects.toThrow("CODEHASH is required");
+    await expect(start(base, () => {})).rejects.toThrow("no signing key");
   });
   test("refuses bad config and a model the agent does not call", async () => {
     await expect(start({ ...env, PEPPER: "short" })).rejects.toThrow("PEPPER must be at least 32 bytes");

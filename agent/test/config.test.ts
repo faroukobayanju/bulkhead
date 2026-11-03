@@ -4,7 +4,7 @@ import { ConfigError, ENV_DOC, envExample, loadConfig } from "../src/config";
 
 const S = (c: string) => c.repeat(32);
 const mock = { NEAR_NETWORK: "testnet", MOCK_LLM: "1", CONVEX_SITE_URL: "https://x.convex.site", AGENT_SECRET: S("a"), PEPPER: S("b"), SESSION_SECRET: S("c"), PROXY_SECRET: S("d") };
-const testnet = { ...mock, MOCK_LLM: undefined, NEAR_RPC: "https://rpc.testnet.near.org", VAULT_ACCOUNT: "v.testnet", AGENT_ACCOUNT: "a.testnet", NEARAI_API_KEY: "k", MEMPOOL_BASE: "https://mempool.space/testnet4/api", BASE_RPC: "https://sepolia.base.org" };
+const testnet = { ...mock, MOCK_LLM: undefined, CODEHASH: "cd".repeat(32), NEAR_RPC: "https://rpc.testnet.near.org", VAULT_ACCOUNT: "v.testnet", AGENT_ACCOUNT: "a.testnet", NEARAI_API_KEY: "k", MEMPOOL_BASE: "https://mempool.space/testnet4/api", BASE_RPC: "https://sepolia.base.org" };
 const main = { ...testnet, NEAR_NETWORK: "mainnet", CODEHASH: "ab".repeat(32), FIREWALL_VERSION: "fw-v1", SITE_URL: "https://bulkhead.example", MEMPOOL_BASE: "https://mempool.space/api" };
 const problems = (env: object) => {
   try {
@@ -36,8 +36,23 @@ describe("config", () => {
   });
   test("there is no local codehash in production", () => {
     expect(problems({ ...main, CODEHASH: undefined })).toContain("CODEHASH is required");
+    expect(problems({ ...testnet, CODEHASH: undefined })).toContain("CODEHASH is required"); // testnet too: only mock may say local
     expect(problems({ ...main, FIREWALL_VERSION: undefined })).toContain("FIREWALL_VERSION is required");
     expect(problems({ ...main, SITE_URL: undefined })).toContain("SITE_URL is required");
+  });
+  test("CONVEX_SITE_URL must be https; http only for localhost on testnet", () => {
+    expect(problems({ ...mock, CONVEX_SITE_URL: "http://x.convex.site" })).toContain("CONVEX_SITE_URL must be an https URL");
+    expect(problems({ ...mock, CONVEX_SITE_URL: "not a url" })).toContain("CONVEX_SITE_URL must be a URL");
+    expect(problems({ ...mock, CONVEX_SITE_URL: "ftp://x" })).toContain("CONVEX_SITE_URL must be an https URL");
+    expect(problems({ ...mock, CONVEX_SITE_URL: "http://localhost:3211" })).toBe("");
+    expect(problems({ ...mock, CONVEX_SITE_URL: "http://127.0.0.1:3211" })).toBe("");
+    expect(problems({ ...main, CONVEX_SITE_URL: "http://localhost:3211" })).toContain("CONVEX_SITE_URL must be an https URL");
+    expect(problems({ ...main, CONVEX_SITE_URL: "http://localhost.evil.com" })).toContain("CONVEX_SITE_URL");
+  });
+  test("NEARAI_BASE cannot be overridden on mainnet", () => {
+    expect(problems({ ...main, NEARAI_BASE: "https://evil.example/v1" })).toContain("NEARAI_BASE may not be overridden on mainnet");
+    expect(problems({ ...main, NEARAI_BASE: "https://cloud-api.near.ai/v1" })).toBe("");
+    expect(problems({ ...testnet, NEARAI_BASE: "https://staging.example/v1" })).toBe("");
   });
   test("mock mode and the agent key are testnet only", () => {
     expect(problems({ ...main, MOCK_LLM: "1" })).toContain("MOCK_LLM is only allowed when NEAR_NETWORK=testnet");

@@ -5,7 +5,9 @@ import { KeyPair } from "near-api-js";
 import cfgJson from "../config/agent.json";
 import { makeViewAccessKey } from "./accesskey";
 import { makeAttest } from "./attest";
-import { loadConfig, type Config } from "./config";
+import { makeChainDeps } from "./chain/vault";
+import { trackCompletion } from "./completions";
+import { loadConfig } from "./config";
 import { makeDb } from "./db";
 import { makeBudget } from "./firewall/budget";
 import { makeJudge } from "./firewall/judge";
@@ -16,26 +18,14 @@ import { makeArenaFirewall } from "./pipeline";
 import { RateLimiter } from "./ratelimit";
 import { makeAlert, makeServer, type ChainDeps } from "./server";
 
-// Task 9a's adapters (src/chain/vault.ts, btc.ts, base.ts) are loaded here, at runtime and by a computed specifier, so this branch
-// type-checks and tests without them. Contract with 9a: vault.ts exports makeChainDeps(cfg, { db, onSettled }) returning the
-// ChainDeps of server.ts except viewAccessKey (accesskey.ts owns the login check). onSettled(tier) frees the process-local lock.
-async function loadChain(cfg: Config, extra: { db: unknown; onSettled: (t: Tier) => void }): Promise<Omit<ChainDeps, "viewAccessKey">> {
-  const spec = "./chain/vault";
-  let mod: { makeChainDeps?: (c: Config, x: typeof extra) => Promise<Omit<ChainDeps, "viewAccessKey">> | Omit<ChainDeps, "viewAccessKey"> };
-  try {
-    mod = await import(spec);
-  } catch (e) {
-    throw new Error(`chain adapters are not available (src/chain/vault.ts, Task 9a): ${(e as Error).message}`);
-  }
-  if (typeof mod.makeChainDeps !== "function") throw new Error("src/chain/vault.ts must export makeChainDeps(cfg, { db, onSettled })");
-  return mod.makeChainDeps(cfg, extra);
-}
+export type Started = { http: ReturnType<typeof Bun.serve>; stop: () => Promise<void> };
 
-export async function start(env: Record<string, string | undefined> = process.env, out: (line: string) => void = console.error) {
+// `o.fetch` and `o.rebroadcastMs` exist for tests; production passes neither.
+export async function start(env: Record<string, string | undefined> = process.env, out: (line: string) => void = console.error, o: { fetch?: typeof fetch; rebroadcastMs?: number } = {}): Promise<Started> {
   const cfg = loadConfig(env);
+  const f = o.fetch ?? fetch;
   const clock = Date.now;
-  const db = makeDb({ fetch, siteUrl: cfg.convexSiteUrl, secret: cfg.agentSecret, pepper: cfg.pepper });
-  const alert = makeAlert({ fetch, url: cfg.alertWebhookUrl });
+  const alert = makeAlert({ fetch: f, url: cfg.alertWebhookUrl });
   const log = (event: string, data: Record<string, unknown>) => out(JSON.stringify({ event, ...data }));
 
   // The chat and judge clients use the models baked into agent.json. An env value that differs would make attestation cover a
@@ -43,35 +33,49 @@ export async function start(env: Record<string, string | undefined> = process.en
   for (const t of [1, 2, 3] as const) if (cfg.models[t] !== TIER_MODEL[t]) throw new Error(`TIER_MODEL_${t} differs from the model the agent calls (${TIER_MODEL[t]})`);
   if (cfg.judgeModel !== cfgJson.judge_model) throw new Error(`JUDGE_MODEL differs from the model the agent calls (${cfgJson.judge_model})`);
 
+  // Signing key for verdicts and attempt rows. In the TEE it comes from the Shade Agent API (Task 10), which is not wired: until
+  // then only a testnet key from env, or a throwaway key in mock mode, can sign.
+  const key = cfg.agentPrivateKey ? KeyPair.fromString(cfg.agentPrivateKey as never) : cfg.mock ? KeyPair.fromRandom("ed25519") : null;
+  if (!key) throw new Error("no signing key: set AGENT_PRIVATE_KEY (testnet only); the Shade Agent key source is Task 10");
+  const sign = (h: Uint8Array) => key.sign(h).signature;
+  const signerId = cfg.agentAccount || "mock";
+
+  const db = makeDb({ fetch: f, siteUrl: cfg.convexSiteUrl, secret: cfg.agentSecret, pepper: cfg.pepper, signer: { id: signerId, sign } });
+
   const prompts = loadTierPrompts();
   let chat, judge, attest;
   if (cfg.mock) {
     ({ chat, judge, attest } = (await import("./mock")).loadMock());
   } else {
-    const client = makeNearAI({ fetch, apiKey: cfg.nearaiApiKey, base: cfg.nearaiBase, prices: cfgJson.prices_usd_per_m, counter: db.counter, clock, dailyUsd: cfg.dailyUsd, onAlert: a => alert("nearai_spend", a) });
+    const att = makeAttest({ fetch: f, base: cfg.nearaiBase, apiKey: cfg.nearaiApiKey, models: cfg.models });
+    // E17: every answered call, tier or judge, gets its response signature checked in the background (never inside the judge's
+    // race); the attempt's row records whether they all verified.
+    const client = makeNearAI({
+      fetch: f, apiKey: cfg.nearaiApiKey, base: cfg.nearaiBase, prices: cfgJson.prices_usd_per_m, counter: db.counter, clock, dailyUsd: cfg.dailyUsd,
+      onAlert: a => alert("nearai_spend", a),
+      onCompletion: trackCompletion(async c => c.id !== null && (await att.verifyCompletion(c.id, c.model, c)).verified),
+    });
     chat = makeChat({ client, prompts: prompts.system, timeoutMs: cfg.llmTimeoutMs });
     judge = makeJudge({ client, model: cfg.judgeModel, timeoutMs: cfg.judgeTimeoutMs });
-    attest = makeAttest({ fetch, base: cfg.nearaiBase, apiKey: cfg.nearaiApiKey, models: cfg.models }).get;
+    attest = att.get;
   }
 
-  // Verdict signing key. In the TEE it comes from the Shade Agent API (Task 10), which is not wired: until then only a testnet key
-  // from env, or a throwaway key in mock mode, can sign.
-  const key = cfg.agentPrivateKey ? KeyPair.fromString(cfg.agentPrivateKey as never) : cfg.mock ? KeyPair.fromRandom("ed25519") : null;
-  if (!key) throw new Error("no signing key: set AGENT_PRIVATE_KEY (testnet only); the Shade Agent key source is Task 10");
-
-  const viewAccessKey = makeViewAccessKey({ fetch, rpcUrl: cfg.nearRpc || "https://rpc.testnet.near.org" });
+  const viewAccessKey = makeViewAccessKey({ fetch: f, rpcUrl: cfg.nearRpc || "https://rpc.testnet.near.org" });
   let settled = (_t: Tier) => {};
   let chain: ChainDeps;
+  let startRebroadcast: ((x: { alert: typeof alert; intervalMs?: number; warn?: (what: string, id: string, e: unknown) => void }) => () => void) | undefined;
   if (cfg.mock && !cfg.vaultAccount) {
     chain = (await import("./mock")).mockChain(viewAccessKey);
   } else {
-    chain = { ...(await loadChain(cfg, { db, onSettled: t => settled(t) })), viewAccessKey };
+    const real = makeChainDeps(cfg, { db: db as never, onSettled: t => settled(t), fetch: f });
+    chain = { ...real, viewAccessKey };
+    startRebroadcast = real.startRebroadcast;
   }
 
   // Public attempt rows, for ids this process no longer holds: Convex's public query, no secret.
   const getAttempt = async (id: string) => {
     if (!cfg.convexUrl) throw new Error("CONVEX_URL is not set");
-    const res = await fetch(`${cfg.convexUrl.replace(/\/+$/, "")}/api/query`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "attempts:get", args: { id }, format: "json" }), signal: AbortSignal.timeout(10_000) });
+    const res = await f(`${cfg.convexUrl.replace(/\/+$/, "")}/api/query`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "attempts:get", args: { id }, format: "json" }), signal: AbortSignal.timeout(10_000) });
     const j: any = await res.json();
     if (!res.ok || j?.status !== "success") throw new Error(`convex query failed: ${res.status}`);
     return (j.value ?? null) as Record<string, any> | null;
@@ -87,7 +91,7 @@ export async function start(env: Record<string, string | undefined> = process.en
     chain,
     db: Object.assign(db, { getAttempt }),
     chat,
-    arenaFirewall: makeArenaFirewall({ budget, judge, timeoutMs: cfg.judgeTimeoutMs }),
+    arenaFirewall: makeArenaFirewall({ budget, judge, timeoutMs: cfg.judgeTimeoutMs, codehash: cfg.codehash, firewallVersion: cfg.firewallVersion }),
     attest,
     promptSha: prompts.sha,
     firewall: {
@@ -95,8 +99,10 @@ export async function start(env: Record<string, string | undefined> = process.en
       keys: k => db.apiKeyExists(createHash("sha256").update(k).digest("hex")),
       limiter: new SlidingWindow(),
       budget,
-      sign: h => key.sign(h).signature,
-      signer: cfg.agentAccount || "mock",
+      sign,
+      signer: signerId,
+      codehash: cfg.codehash,
+      firewallVersion: cfg.firewallVersion,
       timeoutMs: cfg.judgeTimeoutMs,
     },
     limiter: new RateLimiter(cfg.rateLimitScale),
@@ -104,14 +110,26 @@ export async function start(env: Record<string, string | undefined> = process.en
     log,
   });
   settled = server.onSettled;
+  // E6: the loop runs in this process, because only this process can free the tier lock.
+  const stopRebroadcast = startRebroadcast?.({ alert, intervalMs: o.rebroadcastMs, warn: (what, id, e) => log(what, { id, error: (e as Error)?.name ?? "unknown" }) });
   const http = Bun.serve({ port: cfg.port, fetch: server.app.fetch });
   out(JSON.stringify({ event: "listening", port: http.port, mock: cfg.mock, network: cfg.network }));
-  return http;
+  return {
+    http,
+    stop: async () => {
+      stopRebroadcast?.();
+      await http.stop(true);
+    },
+  };
 }
 
 if (import.meta.main) {
-  start().catch(e => {
-    console.error(e instanceof Error ? e.message : e);
-    process.exit(1);
-  });
+  start()
+    .then(({ stop }) => {
+      for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => void stop().then(() => process.exit(0)));
+    })
+    .catch(e => {
+      console.error(e instanceof Error ? e.message : e);
+      process.exit(1);
+    });
 }
