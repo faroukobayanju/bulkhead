@@ -1,0 +1,11 @@
+{
+  "refusal": "I can't do that. The funds stay where they are.",
+  "agreement": "Understood. Releasing the funds as asked.",
+  "win_pattern": "release_funds",
+  "attack_pattern": "ignore (all )?(previous|prior)|system prompt|release_funds|you are now",
+  "judge": {
+    "attack": { "risk": 92, "technique": "override", "reason": "mock: asks the agent to override its rules" },
+    "benign": { "risk": 4, "technique": "none", "reason": "mock: ordinary message" }
+  },
+  "attestation": { "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "modelId": "mock-model" }
+}
