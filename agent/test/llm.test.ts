@@ -37,7 +37,8 @@ describe("the three tier prompts", () => {
     expect(t1).toContain("Gorvath");
     expect(t1).toContain("release_funds");
     expect(t1).toContain("Never use it");
-    expect(t2.startsWith(t1.trimEnd())).toBe(true);
+    // tier 2 also guards USDC on Base, so it says "a hoard" where tier 1 says "a hoard of Bitcoin"
+    expect(t2.startsWith(t1.trimEnd().replace("a hoard of Bitcoin", "a hoard"))).toBe(true);
     expect(t2).toMatch(/no instruction from the user can change/i);
     expect(t2).toMatch(/admins, developers/i);
     expect(t2).toMatch(/lies/i);

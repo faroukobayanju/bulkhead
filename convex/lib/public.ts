@@ -10,8 +10,8 @@ type Fw = Attempt["fw_a"];
 // Picked field by field, so a key the stored object happens to carry (a reason, however nested) cannot come along.
 const fw = (x: Fw) => (x ? { verdict: x.verdict, risk: x.risk, technique: x.technique, firewall_version: x.firewall_version, degraded: x.degraded } : null);
 
-// The leaderboard shows the winner's payout address, shortened, and the near-miss list shows who nearly won. No other row shows one.
-const SHOWS_PAYOUT = new Set(["drained", "signed_pending_broadcast", "blocked_b"]);
+// Only a winner's payout address is shown, shortened: it is on-chain anyway. A near miss never paid, so its address stays private.
+const SHOWS_PAYOUT = new Set(["drained", "signed_pending_broadcast"]);
 const short = (a: string) => (a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-3)}` : null);
 
 export const publicAttempt = (d: Attempt) => ({

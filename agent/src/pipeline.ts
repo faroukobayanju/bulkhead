@@ -102,6 +102,8 @@ export type PipelineDeps = {
   tierOpen: (tier: Tier) => Promise<TierState>;
   // E6: after `release` threw, did the contract sign for this attempt? Only an answer of exactly `false` means no. It has to look at
   // this attempt id, since after a round that leaves rounds over the tier is Open again (with a cooldown), not Releasing or Drained.
+  // Return false only when the release tx is known final and failed (or expired, never included) AND get_pending_tx(attemptId) is
+  // None. A tx still in flight can execute later, so while the outcome is unknown, throw: the pipeline then treats it as signed.
   wasSigned: (tier: Tier, attemptId: string) => Promise<boolean>;
   promptSha: Record<Tier, string>;
   codehash: string;

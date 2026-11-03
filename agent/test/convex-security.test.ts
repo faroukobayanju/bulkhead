@@ -310,12 +310,12 @@ describe("public queries", () => {
     expect(((await s.t.query(api.attempts.nearMisses, {})) as any[]).map(x => x.id)).toEqual([idN(3), idN(1)]);
   });
 
-  test("the payout shown is shortened, and only on outcomes a leaderboard shows", async () => {
+  test("only a winner's payout is shown, shortened; a near miss shows none", async () => {
     await seed();
     const near = (await s.t.query(api.attempts.get, { id: idN(1) })) as any;
     const refused = (await s.t.query(api.attempts.get, { id: idN(2) })) as any;
     const won = (await s.t.query(api.attempts.get, { id: idN(3) })) as any;
-    expect(near.payout).toBe("tb1qw5\u2026zsx");
+    expect(near.payout).toBeNull();
     expect(won.payout).toBe("bc1qar\u2026mdq");
     expect(refused.payout).toBeNull();
     for (const r of [near, won]) expect(text(r)).not.toContain("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx");
