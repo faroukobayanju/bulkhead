@@ -1,1 +1,1 @@
-{"name":"bulkhead","private":true,"workspaces":["agent","shared"],"dependencies":{"convex":"1.48.0"},"devDependencies":{"convex-test":"0.0.66"}}
+{"name":"bulkhead","private":true,"workspaces":["agent","shared","scripts"],"dependencies":{"convex":"1.48.0"},"devDependencies":{"convex-test":"0.0.66"}}
