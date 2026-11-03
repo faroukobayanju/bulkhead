@@ -1,5 +1,6 @@
 // The one client for every NEAR AI call. A call needs max_tokens and a timeout, a model with a price, and room under the
 // daily spend cap. Spend is counted in whole micro-dollars: a price in USD per million tokens is micro-USD per token.
+import { createHash } from "node:crypto";
 import type { Counter } from "./counter";
 import { utcDay } from "./counter";
 
@@ -22,7 +23,11 @@ export type ChatResult = {
   finish_reason: string | null;
   usage: { prompt_tokens: number; completion_tokens: number } | null;
   message: Record<string, unknown>; // first choice's message, for tool_calls
+  completion?: CompletionInfo;
 };
+// What E17's post-completion check needs: the completion id (for /v1/signature/<id>) and the hashes of the exact request and
+// response bytes the signature covers. id is null when the response carried none.
+export type CompletionInfo = { id: string | null; model: string; requestHash: string; responseHash: string };
 export type NearAI = { chat(r: ChatRequest): Promise<ChatResult> };
 
 export type NearAIErrorCode = "bad_request" | "no_price" | "spend_cap" | "timeout" | "aborted" | "network" | "http" | "bad_response";
@@ -64,6 +69,8 @@ export function makeNearAI(o: {
   clock: () => number;
   dailyUsd: number;
   onAlert: (a: SpendAlert) => void | Promise<void>;
+  // Told about every answered call, after it is read and never awaited, so a slow signature check cannot hold up the model's caller.
+  onCompletion?: (c: CompletionInfo) => void;
 }): NearAI {
   if (!o.apiKey) throw new Error("NEARAI_API_KEY is required");
   if (!(o.dailyUsd > 0 && Number.isFinite(o.dailyUsd))) throw new Error(`daily spend limit must be a positive number, got ${o.dailyUsd}`);
@@ -113,12 +120,14 @@ export function makeNearAI(o: {
       let timedOut = false;
       const timer = setTimeout(() => ((timedOut = true), ac.abort()), r.timeoutMs);
       let res: Response, text: string;
+      let requestBody = "";
       try {
         const { model, messages, max_tokens, temperature, reasoning_effort, response_format, tools, tool_choice } = r;
+        requestBody = JSON.stringify({ model, messages, max_tokens, temperature, reasoning_effort, response_format, tools, tool_choice });
         res = await o.fetch(`${o.base}/chat/completions`, {
           method: "POST",
-          headers: { authorization: `Bearer ${o.apiKey}`, "content-type": "application/json" },
-          body: JSON.stringify({ model, messages, max_tokens, temperature, reasoning_effort, response_format, tools, tool_choice }),
+          headers: { authorization: `Bearer ${o.apiKey}`, "content-type": "application/json", "accept-encoding": "identity" },
+          body: requestBody,
           signal,
         });
         text = await res.text();
@@ -144,7 +153,13 @@ export function makeNearAI(o: {
       if (usage && !Number.isFinite(cost(usage.prompt_tokens, usage.completion_tokens))) usage = null;
       const actual = usage ? cost(usage.prompt_tokens, usage.completion_tokens) : worst;
       await alertOnce(day, actual === worst ? reserved : (await o.counter.add(key, actual - worst))!);
+      const sha = (x: string) => createHash("sha256").update(x).digest("hex");
+      const completion: CompletionInfo = { id: typeof body.id === "string" && body.id ? body.id : null, model: r.model, requestHash: sha(requestBody), responseHash: sha(text) };
+      try {
+        o.onCompletion?.(completion);
+      } catch {}
       return {
+        completion,
         content: typeof choice.message.content === "string" ? choice.message.content : null,
         finish_reason: typeof choice.finish_reason === "string" ? choice.finish_reason : null,
         usage,

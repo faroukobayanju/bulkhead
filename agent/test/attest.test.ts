@@ -97,7 +97,18 @@ describe("get", () => {
     let n = 0;
     const flaky = setup(() => (n++ === 0 ? { nope: 1 } : report()));
     await expect(flaky.a.get(1)).rejects.toThrow();
-    expect((await flaky.a.get(1)).modelId).toBe(MODEL);
+    expect(n).toBe(1);
+  });
+  test("a failure is remembered for 30 s, so an outage is not hit once per attempt, then tried again", async () => {
+    let n = 0;
+    const s = setup(() => (n++ === 0 ? { nope: 1 } : report()));
+    await expect(s.a.get(1)).rejects.toThrow("nonce_mismatch");
+    s.now.t = 29_999;
+    await expect(s.a.get(1)).rejects.toThrow("nonce_mismatch");
+    expect(n).toBe(1); // no second request
+    s.now.t = 30_000;
+    expect((await s.a.get(1)).modelId).toBe(MODEL);
+    expect(n).toBe(2);
   });
 });
 
@@ -143,12 +154,38 @@ describe("verifyCompletion", () => {
     expect((await check(await signed(tee, `${MODEL}:${req}:${resp}`, "router"))).reason).toBe("unknown_signature_kind");
     expect((await check(await signed(tee, `${MODEL}:${req}:${resp}`, "provider_tee", { signing_algo: "ed25519" }))).reason).toBe("signing_algo_not_ecdsa");
   });
-  test("no prior attestation for the model, and an http error", async () => {
+  test("a model never attested (the judge's) is attested first; if that fails the signature is unverified", async () => {
     const a = makeAttest({ fetch: (async () => json({})) as never, models: MODELS });
-    expect((await a.verifyCompletion("c", MODEL, { requestHash: req, responseHash: resp })).reason).toBe("no_attestation_for_model");
+    expect((await a.verifyCompletion("c", MODEL, { requestHash: req, responseHash: resp })).reason).toBe("attestation_unavailable:nonce_mismatch");
+    const calls: string[] = [];
+    const t = Object.assign(await signed(tee, `${MODEL}:${req}:${resp}`));
+    const b = makeAttest({ fetch: (async (u: string) => (calls.push(u), json(String(u).includes("/signature/") ? t : report()))) as never, models: MODELS, nonce: () => NONCE, nras: false });
+    expect(await b.verifyCompletion("c", MODEL, { requestHash: req, responseHash: resp })).toEqual({ verified: true });
+    expect(calls[0]).toContain("/attestation/report");
+  });
+  test("the attested signer expires with the cache: a late signature check attests again", async () => {
+    const t = await signed(tee, `${MODEL}:${req}:${resp}`);
+    const now = { t: 0 };
+    const calls: string[] = [];
+    const a = makeAttest({ fetch: (async (u: string) => (calls.push(u), json(String(u).includes("/signature/") ? t : report()))) as never, models: MODELS, nonce: () => NONCE, nras: false, clock: () => now.t });
+    await a.verifyCompletion("c", MODEL, { requestHash: req, responseHash: resp });
+    now.t = 600_001;
+    await a.verifyCompletion("c", MODEL, { requestHash: req, responseHash: resp });
+    expect(calls.filter(u => u.includes("/attestation/report")).length).toBe(2);
+  });
+  test("a 404 from /signature is retried once, then unverified", async () => {
+    const t = await signed(tee, `${MODEL}:${req}:${resp}`);
+    let n = 0;
+    const mk = (until: number) => makeAttest({ fetch: (async (u: string) => (String(u).includes("/signature/") ? (n++ < until ? new Response("x", { status: 404 }) : json(t)) : json(report()))) as never, models: MODELS, nonce: () => NONCE, nras: false, retryMs: 0 });
+    expect(await mk(1).verifyCompletion("c", MODEL, { requestHash: req, responseHash: resp })).toEqual({ verified: true });
+    n = 0;
+    expect((await mk(5).verifyCompletion("c", MODEL, { requestHash: req, responseHash: resp })).reason).toBe("attestation_http_404");
+    expect(n).toBe(2);
+  });
+  test("http error on the signature fetch", async () => {
     const s = setup();
     await s.a.get(1);
-    const down = makeAttest({ fetch: (async (u: string) => (String(u).includes("/signature/") ? new Response("x", { status: 404 }) : json(report()))) as never, models: MODELS, nonce: () => NONCE, nras: false });
+    const down = makeAttest({ fetch: (async (u: string) => (String(u).includes("/signature/") ? new Response("x", { status: 404 }) : json(report()))) as never, models: MODELS, nonce: () => NONCE, nras: false, retryMs: 0 });
     await down.get(1);
     expect((await down.verifyCompletion("c", MODEL, { requestHash: req, responseHash: resp })).reason).toBe("attestation_http_404");
   });

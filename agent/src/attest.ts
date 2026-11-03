@@ -27,6 +27,7 @@ export type CompletionCheck = { verified: boolean; reason?: string };
 
 type Cached = { at: number; result: AttestResult; models: Set<string>; gateway: string };
 const TTL_MS = 600_000;
+const FAIL_TTL_MS = 30_000; // a failed attestation is remembered this long, so an outage is not hammered once per attempt
 const isObj = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
 const str = (x: unknown): x is string => typeof x === "string" && x.length > 0;
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -60,6 +61,7 @@ export function makeAttest(o: {
   nonce?: () => string; // 64 hex chars
   clock?: () => number;
   timeoutMs?: number;
+  retryMs?: number; // wait before the one retry of a 404 from /v1/signature (the signature can lag the completion), default 500
   nras?: boolean; // submit each nvidia_payload to NVIDIA NRAS (default true); false marks nvidia_nras "skipped"
 }) {
   const base = (o.base ?? "https://cloud-api.near.ai/v1").replace(/\/+$/, "");
@@ -69,7 +71,8 @@ export function makeAttest(o: {
   const useNras = o.nras ?? true;
   const headers: Record<string, string> = o.apiKey ? { authorization: `Bearer ${o.apiKey}` } : {};
   const cache = new Map<string, Promise<Cached>>();
-  const settled = new Map<string, Cached>(); // what verifyCompletion matches signatures against
+  const settled = new Map<string, Cached>(); // what verifyCompletion matches signatures against; entries expire with the cache TTL
+  const failed = new Map<string, { at: number; error: AttestError }>();
 
   async function getJson(url: string, init?: RequestInit): Promise<unknown> {
     let res: Response;
@@ -139,37 +142,59 @@ export function makeAttest(o: {
     return { at: clock(), result: { sha256: digest, modelId: model, checks, notVerified: NOT_VERIFIED }, models, gateway: addr(gw.signing_address) };
   }
 
+  async function getModel(model: string): Promise<AttestResult> {
+    const bad = failed.get(model);
+    if (bad && clock() - bad.at < FAIL_TTL_MS) throw bad.error;
+    const hit = cache.get(model);
+    if (hit) {
+      const c = await hit.catch(() => null);
+      if (c && clock() - c.at <= TTL_MS) return c.result;
+      if (cache.get(model) === hit) cache.delete(model);
+    }
+    const p = fetchOne(model);
+    cache.set(model, p);
+    try {
+      const c = await p;
+      settled.set(model, c);
+      failed.delete(model);
+      return c.result;
+    } catch (e) {
+      if (cache.get(model) === p) cache.delete(model);
+      if (e instanceof AttestError) failed.set(model, { at: clock(), error: e });
+      throw e;
+    }
+  }
+
   return {
+    getModel,
     async get(tier: Tier): Promise<AttestResult> {
       const model = o.models[tier];
       if (!model) throw new AttestError("unknown_tier");
-      const hit = cache.get(model);
-      if (hit) {
-        const c = await hit.catch(() => null);
-        if (c && clock() - c.at <= TTL_MS) return c.result;
-        if (cache.get(model) === hit) cache.delete(model);
-      }
-      const p = fetchOne(model);
-      cache.set(model, p);
-      try {
-        const c = await p;
-        settled.set(model, c);
-        return c.result;
-      } catch (e) {
-        if (cache.get(model) === p) cache.delete(model);
-        throw e;
-      }
+      return getModel(model);
     },
 
     // After a completion (E17). Never throws: a response with no verifiable signature is stored with response_verified = false
     // and the attempt goes on. requestHash and responseHash are sha256 hex of the exact request and response body bytes.
     async verifyCompletion(chatId: string, model: string, expected: { requestHash: string; responseHash: string }): Promise<CompletionCheck> {
       const no = (reason: string): CompletionCheck => ({ verified: false, reason });
+      // The signer must come from a fresh attestation of this model (the judge's model has not been asked for before).
+      try {
+        await getModel(model);
+      } catch (e) {
+        return no(`attestation_unavailable:${(e as Error).message}`);
+      }
       const att = settled.get(model);
-      if (!att) return no("no_attestation_for_model");
+      if (!att || clock() - att.at > TTL_MS) return no("no_attestation_for_model");
+      const sigUrl = `${base}/signature/${encodeURIComponent(chatId)}?model=${encodeURIComponent(model)}&signing_algo=ecdsa`;
       let sig: unknown;
       try {
-        sig = await getJson(`${base}/signature/${encodeURIComponent(chatId)}?model=${encodeURIComponent(model)}&signing_algo=ecdsa`, { headers });
+        try {
+          sig = await getJson(sigUrl, { headers });
+        } catch (e) {
+          if ((e as Error).message !== "attestation_http_404") throw e;
+          await new Promise(r => setTimeout(r, o.retryMs ?? 500));
+          sig = await getJson(sigUrl, { headers });
+        }
       } catch (e) {
         return no((e as Error).message);
       }
