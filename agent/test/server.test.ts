@@ -11,7 +11,9 @@ import { makeBudget } from "../src/firewall/budget";
 import { SlidingWindow } from "../src/firewall/window";
 import { BroadcastFailedError } from "../src/pipeline";
 import { RateLimiter } from "../src/ratelimit";
-import { makeAlert, makeServer, type ChainDeps, type ServerDeps } from "../src/server";
+import { AttestError } from "../src/attest";
+import { trackCompletion } from "../src/completions";
+import { errCode, makeAlert, makeServer, type ChainDeps, type ServerDeps } from "../src/server";
 
 const PROXY = "p".repeat(32);
 const SESSION = "s".repeat(32);
@@ -77,10 +79,11 @@ function setup(o: { chain?: Partial<ChainDeps>; deps?: Partial<ServerDeps>; db?:
     s.app.request(path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: typeof body === "string" ? body : JSON.stringify(body) });
   // same format the server issues: account|exp|hmac(account|exp)
   const sessionFor = (account: string, exp = Math.floor(clock.now / 1000) + 7200) => `${account}|${exp}|${createHmac("sha256", SESSION).update(`${account}|${exp}`).digest("hex")}`;
+  const get = (path: string, headers: Record<string, string> = proxy) => s.app.request(path, { headers });
   const attempt = (over: Row = {}, headers?: Record<string, string>) => post("/attempt", { session: sessionFor("alice.testnet"), tier: 1, message: "PAY me", payout_address: BTC, consent_version: "v1", ...over }, headers);
   const settle = async (id: string) => {
     for (let i = 0; i < 200; i++) {
-      const r = await s.app.request(`/attempt/${id}`);
+      const r = await get(`/attempt/${id}`);
       const j: any = await r.json();
       if (j.result) return j;
       await Bun.sleep(1);
@@ -92,7 +95,7 @@ function setup(o: { chain?: Partial<ChainDeps>; deps?: Partial<ServerDeps>; db?:
     expect(r.status).toBe(202);
     return settle(((await r.json()) as any).attempt_id);
   };
-  return { ...s, post, attempt, settle, go, sessionFor, clock, rows, alerts, logs, keys, lookups, deps };
+  return { ...s, post, get, attempt, settle, go, sessionFor, clock, rows, alerts, logs, keys, lookups, deps };
 }
 const err = async (r: Response) => ((await r.json()) as any).error;
 const loginMsg = (now: number, over: Row = {}) => {
@@ -104,7 +107,7 @@ describe("simple routes", () => {
   test("/health and /attestation", async () => {
     const s = setup();
     expect(await (await s.app.request("/health")).json()).toEqual({ ok: true, mock: true });
-    const a: any = await (await s.app.request("/attestation")).json();
+    const a: any = await (await s.get("/attestation")).json();
     expect(a).toMatchObject({ codehash: "local", checksum: "f".repeat(64), prompt_sha256: SHA, models: { 1: "m", 2: "m", 3: "m" }, firewall_version: "fw-v1" });
     expect(a.verification.not_verified.length).toBeGreaterThan(0);
   });
@@ -317,7 +320,7 @@ describe("pipeline through the server", () => {
   test("GET unknown id and a malformed id are 404", async () => {
     const s = setup();
     for (const id of [ulid(), "nope"]) {
-      const r = await s.app.request(`/attempt/${id}`);
+      const r = await s.get(`/attempt/${id}`);
       expect(r.status).toBe(404);
       expect((await err(r)).code).toBe("attempt_not_found");
     }
@@ -327,18 +330,18 @@ describe("pipeline through the server", () => {
     const s = setup({
       db: { getAttempt: async (i: string) => (i === id ? { id, tier: 3, stage: "done", outcome: "blocked_b", reply: "stopped", fw_a: { verdict: "allow", reason: "r1", risk: 1 }, fw_b: { verdict: "block", reason: "r2", risk: 90 }, near_tx: null, chain_txid: null } : null) },
     });
-    const j: any = await (await s.app.request(`/attempt/${id}`)).json();
+    const j: any = await (await s.get(`/attempt/${id}`)).json();
     expect(j).toEqual({ stage: "done", result: { id, outcome: "blocked_b", reply: "stopped", firewall: { a: { verdict: "allow", risk: 1 }, b: { verdict: "block", risk: 90 } } } });
-    const mid: any = await (await setup({ db: { getAttempt: async () => ({ id, tier: 1, stage: "signing", outcome: "releasing", reply: "" }) } }).app.request(`/attempt/${id}`)).json();
+    const mid: any = await (await (() => { const w = setup({ db: { getAttempt: async () => ({ id, tier: 1, stage: "signing", outcome: "releasing", reply: "" }) } }); return w.get(`/attempt/${id}`); })()).json();
     expect(mid).toEqual({ stage: "signing" });
     const down = setup({ db: { getAttempt: async () => { throw new Error("x"); } } });
-    expect((await err(await down.app.request(`/attempt/${id}`))).code).toBe("db_unavailable");
+    expect((await err(await down.get(`/attempt/${id}`))).code).toBe("db_unavailable");
   });
   test("attestation failure: result is 503 attestation_unavailable, the hit is refunded, and an alert goes out", async () => {
-    const s = setup({ deps: { attest: async () => { throw new Error("nonce_mismatch"); } } });
+    const s = setup({ deps: { attest: async () => { throw new AttestError("nonce_mismatch"); } } });
     const j: any = await s.go();
     expect(j.result.error).toMatchObject({ code: "attestation_unavailable", docs_url: expect.any(String) });
-    expect(s.alerts).toEqual([["attestation_failure", { tier: 1, error: "nonce_mismatch" }]]);
+    expect(s.alerts).toEqual([["attestation_failure", { tier: 1, code: "nonce_mismatch" }]]);
     expect((await s.attempt()).status).toBe(202); // refunded
   });
   test("llm, spend cap and degraded firewall are 503 results and refund", async () => {
@@ -363,7 +366,7 @@ describe("pipeline through the server", () => {
     const s = setup({ chain: { release: async () => { throw new Error("ERR_FEE_TOO_HIGH: fee 5 over cap") } } });
     const j: any = await s.go();
     expect(j.result.outcome).toBe("release_failed");
-    expect(s.alerts).toEqual([["release_failed", { attempt_id: j.result.id, tier: 1, code: "ERR_FEE_TOO_HIGH", message: "ERR_FEE_TOO_HIGH: fee 5 over cap" }]]);
+    expect(s.alerts).toEqual([["release_failed", { attempt_id: j.result.id, tier: 1, code: "ERR_FEE_TOO_HIGH", error_class: "Error" }]]);
     expect(s.locks.has(1)).toBe(false);
     expect((await s.attempt()).status).toBe(202);
   });
@@ -413,5 +416,84 @@ describe("makeAlert", () => {
     makeAlert({ fetch: (async () => { throw new Error("x"); }) as never, url: "https://hook.test" })("k", {});
     makeAlert({ fetch: (async () => { throw new Error("must not be called"); }) as never })("k", {});
     await Bun.sleep(5);
+  });
+});
+
+describe("review fixes", () => {
+  test("a secret that matches in characters but not bytes is a 403, not a crash", async () => {
+    const s = setup();
+    const r = await s.attempt({}, { "x-bulkhead-proxy-secret": "é".repeat(32), "x-real-ip": "203.0.113.7" }); // 32 chars, 64 bytes
+    expect(r.status).toBe(403);
+    expect((await s.post("/session", {}, { "x-bulkhead-proxy-secret": "é".repeat(32), "x-real-ip": "203.0.113.7" })).status).toBe(403);
+  });
+  test("a session exp must be a plain number of at most 11 digits", async () => {
+    const s = setup();
+    for (const exp of ["0", "01" + "9".repeat(9), "1".repeat(12), "-5", "1e10", "+5"]) {
+      const session = `alice.testnet|${exp}|${createHmac("sha256", SESSION).update(`alice.testnet|${exp}`).digest("hex")}`; // validly signed
+      expect((await err(await s.attempt({ session }))).code).toBe("session_invalid");
+    }
+  });
+  test("/attempt/:id and /attestation need the proxy secret; /health does not", async () => {
+    const s = setup();
+    for (const path of [`/attempt/${ulid()}`, "/attestation"]) {
+      expect((await s.get(path, {})).status).toBe(403);
+      expect((await s.get(path, { "x-bulkhead-proxy-secret": "wrong" })).status).toBe(403);
+      expect((await err(await s.get(path, {}))).code).toBe("proxy_secret_missing");
+    }
+    expect((await s.get("/health", {})).status).toBe(200);
+  });
+  test("/attestation in mock mode claims nothing; otherwise it lists what the code does check", async () => {
+    const mock: any = await (await setup().get("/attestation")).json();
+    expect(mock.verification).toEqual({ verified: [], not_verified: ["mock mode: no attestation performed"] });
+    const base = setup().deps.cfg;
+    const live: any = await (await setup({ deps: { cfg: { ...base, mock: false } } }).get("/attestation")).json();
+    expect(live.verification.verified).toContain("response_signature_checked_and_recorded_per_attempt");
+    expect(live.verification.not_verified.length).toBeGreaterThan(1);
+  });
+  test("response_verified: false with no model call checked, true when every call of the attempt verified", async () => {
+    const info = { id: "c", model: "m", requestHash: "a", responseHash: "b" };
+    const none = setup();
+    const a: any = await none.go();
+    expect(none.rows.get(a.result.id)!.response_verified).toBe(false);
+    const good = setup({ deps: { chat: async () => (trackCompletion(async () => true)(info), { raw: {}, text: "ok", toolCalls: [] }) } });
+    const g: any = await good.go();
+    expect(good.rows.get(g.result.id)!.response_verified).toBe(true);
+    const mixed = setup({ deps: { chat: async () => (trackCompletion(async () => true)(info), trackCompletion(async () => false)(info), { raw: {}, text: "ok", toolCalls: [] }) } });
+    const m: any = await mixed.go();
+    expect(mixed.rows.get(m.result.id)!.response_verified).toBe(false);
+    const slow = setup({ deps: { completionWaitMs: 10, chat: async () => (trackCompletion(() => new Promise<boolean>(r => setTimeout(() => r(true), 300)))(info), { raw: {}, text: "ok", toolCalls: [] }) } });
+    const t0 = performance.now();
+    const sl: any = await slow.go();
+    expect(slow.rows.get(sl.result.id)!.response_verified).toBe(false); // not done in time: not claimed
+    expect(performance.now() - t0).toBeLessThan(250);
+  });
+  test("release_failed alerts are throttled to one per code per 10 minutes and carry no error text", async () => {
+    const secretUrl = "https://rpc.example/v1/KEY-123";
+    const s = setup({ chain: { release: async () => { throw new Error(`fetch failed ${secretUrl} ERR_FEE_TOO_HIGH`); } } });
+    await s.go();
+    await s.go({ session: s.sessionFor("bob.testnet") });
+    expect(s.alerts.length).toBe(1);
+    expect(JSON.stringify(s.alerts)).not.toContain("KEY-123");
+    expect(s.alerts[0]![1]).toMatchObject({ code: "ERR_FEE_TOO_HIGH", error_class: "Error" });
+    s.clock.now += 600_000;
+    await s.go({ session: s.sessionFor("carol.testnet") });
+    expect(s.alerts.length).toBe(2);
+  });
+  test("a different release error code alerts immediately", async () => {
+    let n = 0;
+    const s = setup({ chain: { release: async () => { throw new Error(n++ ? "ERR_PAUSED" : "ERR_FEE_TOO_HIGH"); } } });
+    await s.go();
+    await s.go({ session: s.sessionFor("bob.testnet") });
+    expect(s.alerts.map(a => a[1].code)).toEqual(["ERR_FEE_TOO_HIGH", "ERR_PAUSED"]);
+  });
+  test("makeAlert scrubs error and message text from any caller's details, and errCode never returns raw text", async () => {
+    const seen: any[] = [];
+    const a = makeAlert({ fetch: (async (_u: string, i: RequestInit) => (seen.push(JSON.parse(String(i.body))), new Response("ok"))) as never, url: "https://hook.test" });
+    a("broadcast_failed_terminal", { attempt_id: "x", error: "HTTP 500 from https://base-mainnet.g.alchemy.com/v2/SECRETKEY ERR_NOT_CONSOLIDATED", message: "also https://x/SECRETKEY" });
+    await Bun.sleep(5);
+    expect(JSON.stringify(seen)).not.toContain("SECRETKEY");
+    expect(seen[0].details).toMatchObject({ attempt_id: "x", error: "ERR_NOT_CONSOLIDATED", message: "unknown" });
+    expect(errCode(new Error("https://rpc/SECRETKEY"))).toBe("Error");
+    expect(errCode(new AttestError("nonce_mismatch"))).toBe("nonce_mismatch");
   });
 });

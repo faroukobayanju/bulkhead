@@ -22,6 +22,7 @@ import {
   type AttemptResult, type TierState,
 } from "./pipeline";
 import { RateLimiter } from "./ratelimit";
+import { responseVerified, withCompletions } from "./completions";
 
 // What the chain side must provide (Task 9a builds it; tests use fakes).
 export type ChainDeps = {
@@ -72,17 +73,23 @@ export type ServerDeps = {
   log?: (event: string, data: Record<string, unknown>) => void;
   newId?: () => string;
   clock?: () => number;
+  completionWaitMs?: number; // how long the row waits for response-signature checks before recording false (default 2000)
 };
 
 const TTL_S = 7200;
 const SESSION_IP_PER_MIN = 10;
 const KEEP_MS = 600_000; // how long a finished attempt stays in memory; after that the database answers
+const ALERT_THROTTLE_MS = 600_000;
 const DEGRADED_MAX = 5;
 const DEGRADED_WINDOW_MS = 600_000;
 const ULID = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 const CONSENT = /^[A-Za-z0-9._-]{1,64}$/; // same rule as the pipeline's, checked here so a 400 never costs a rate-limit slot
 const tierOf = (x: unknown): Tier | null => (x === 1 || x === 2 || x === 3 ? x : null);
-const eq = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+// Byte lengths, not string lengths: timingSafeEqual throws on buffers of different size, and "é" is one character but two bytes.
+const eq = (a: string, b: string) => {
+  const [x, y] = [Buffer.from(a), Buffer.from(b)];
+  return x.length === y.length && timingSafeEqual(x, y);
+};
 const isObj = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
 
 type Fail = { status: ContentfulStatusCode; code: string; message: string; fix: string };
@@ -129,10 +136,20 @@ const CLASS: [new (...a: any[]) => Error, Code][] = [
 
 type Entry = { stage: Stage; result?: unknown; at: number };
 
+// Alerts carry codes and classes, never raw error text: a viem or fetch error can embed an RPC URL with its API key.
+export const errCode = (e: unknown): string => {
+  const c = (e as { code?: unknown })?.code;
+  if (typeof c === "string" && /^[A-Za-z0-9_:.-]{1,64}$/.test(c)) return c;
+  return /ERR_[A-Z_]+/.exec(String((e as Error)?.message ?? e))?.[0] ?? (e as Error)?.name ?? "unknown";
+};
+// A string under `error` or `message` in alert details is replaced by its code, whoever built the details (the rebroadcast loop too).
+const scrub = (d: Record<string, unknown>) => Object.fromEntries(Object.entries(d).map(([k, v]) => [k, (k === "error" || k === "message") && typeof v === "string" ? errCode(v) : v]));
+
 export function makeAlert(o: { fetch: typeof fetch; url?: string; clock?: () => number }): Alert {
   // Never throws and never waits for the webhook: a broken receiver must not slow or fail an attempt.
   return (kind, details) => {
     if (!o.url) return;
+    details = scrub(details);
     Promise.resolve()
       .then(() => o.fetch(o.url!, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind, details, ts: isoMs((o.clock ?? Date.now)()) }), signal: AbortSignal.timeout(5000) }))
       .catch(() => {});
@@ -203,7 +220,7 @@ export function makeServer(d: ServerDeps) {
   const accountOf = (session: unknown): string | null => {
     if (typeof session !== "string") return null;
     const [account, exp, mac, ...rest] = session.split("|");
-    if (!account || !exp || !mac || rest.length || !/^\d+$/.test(exp)) return null;
+    if (!account || !exp || !mac || rest.length || !/^[1-9]\d{0,10}$/.test(exp)) return null;
     if (!eq(mac, sign(account, Number(exp)))) return null;
     return Number(exp) * 1000 > now() ? account : null;
   };
@@ -246,6 +263,7 @@ export function makeServer(d: ServerDeps) {
     }
   };
   let lastAttestAlert = 0;
+  const lastRelease = new Map<string, number>();
 
   // AttemptResult in the wire's snake_case. The firewall objects never carry `reason` (the pipeline strips it).
   const wire = (r: AttemptResult) => ({
@@ -259,7 +277,7 @@ export function makeServer(d: ServerDeps) {
     const e = attempts.get(id)!;
     let releaseError: unknown;
     try {
-      const r = await runAttempt(
+      const r = await withCompletions(() => runAttempt(
         {
           chat: d.chat,
           firewall: async req => {
@@ -281,12 +299,14 @@ export function makeServer(d: ServerDeps) {
             } catch (err) {
               if (now() - lastAttestAlert > 60_000) {
                 lastAttestAlert = now();
-                alert("attestation_failure", { tier: t, error: String((err as Error)?.message ?? err).slice(0, 200) });
+                alert("attestation_failure", { tier: t, code: errCode(err) });
               }
               throw err;
             }
           },
-          insertAttempt: d.db.insertAttempt,
+          // E17: every model call of this attempt is already being checked (completions.ts); the row records the outcome of those
+          // checks, false for any that is not done or did not verify
+          insertAttempt: async row => d.db.insertAttempt({ ...row, response_verified: await responseVerified(d.completionWaitMs) }),
           updateAttempt: d.db.updateAttempt,
           tierOpen: d.chain.tierOpen,
           wasSigned: d.chain.wasSigned,
@@ -303,13 +323,17 @@ export function makeServer(d: ServerDeps) {
           clock: d.clock,
         },
         inp,
-      );
+      ));
       const info = { attempt_id: id, tier: key.tier, near_tx: r.txs?.nearTx, chain_txid: r.txs?.chainTxid };
       if (r.outcome === "drained" || r.outcome === "signed_pending_broadcast") alert(r.outcome, info);
       if (r.outcome === "release_failed") {
         refund(); // no money moved: the player may try again
-        const m = String((releaseError as Error)?.message ?? releaseError ?? "");
-        alert("release_failed", { attempt_id: id, tier: key.tier, code: /ERR_[A-Z_]+/.exec(m)?.[0] ?? (releaseError as Error)?.name ?? "unknown", message: m.slice(0, 300) });
+        // one alert per error code per 10 minutes: a broken gas wallet would otherwise page on every attempt
+        const code = errCode(releaseError);
+        if (now() - (lastRelease.get(code) ?? -Infinity) >= ALERT_THROTTLE_MS) {
+          lastRelease.set(code, now());
+          alert("release_failed", { attempt_id: id, tier: key.tier, code, error_class: (releaseError as Error)?.name ?? "unknown" });
+        }
       }
       e.result = wire(r);
     } catch (err) {
@@ -390,6 +414,7 @@ export function makeServer(d: ServerDeps) {
   };
 
   app.get("/attempt/:id", async c => {
+    if (!viaProxy(c)) return fail(c, "proxy_secret_missing");
     const id = c.req.param("id");
     if (!ULID.test(id)) return fail(c, "attempt_not_found");
     const e = attempts.get(id);
@@ -405,8 +430,9 @@ export function makeServer(d: ServerDeps) {
 
   firewallRoutes(app as never, { ...d.firewall, proxySecret: d.cfg.proxySecret });
 
-  app.get("/attestation", c =>
-    c.json({
+  app.get("/attestation", c => {
+    if (!viaProxy(c)) return fail(c, "proxy_secret_missing");
+    return c.json({
       codehash: d.cfg.codehash,
       checksum: d.cfg.configSha,
       prompt_sha256: d.promptSha,
@@ -415,12 +441,14 @@ export function makeServer(d: ServerDeps) {
       firewall_version: d.cfg.firewallVersion,
       mock: d.cfg.mock,
       // what the model attestation check covers, so nobody reads more into "attested" than the code does
-      verification: {
-        verified: ["gateway_and_model_nonce", "signing_address_present_on_every_model_entry", "quote_report_data_binds_address_and_nonce", "nvidia_nras_verdict", "response_signature_when_present"],
-        not_verified: NOT_VERIFIED,
-      },
-    }),
-  );
+      verification: d.cfg.mock
+        ? { verified: [], not_verified: ["mock mode: no attestation performed"] }
+        : {
+            verified: ["gateway_and_model_nonce", "signing_address_present_on_every_model_entry", "quote_report_data_binds_address_and_nonce", "nvidia_nras_verdict", "response_signature_checked_and_recorded_per_attempt"],
+            not_verified: NOT_VERIFIED,
+          },
+    });
+  });
   app.get("/health", c => c.json({ ok: true, mock: d.cfg.mock }));
 
   // The rebroadcast loop calls this when it settles a tier, so the process-local lock the pipeline kept (a paid tier) is freed.

@@ -33,7 +33,7 @@ describe("start()", () => {
     const http = await start(env, () => {});
     try {
       expect(await (await fetch(`http://localhost:${http.port}/health`)).json()).toEqual({ ok: true, mock: true });
-      const a: any = await (await fetch(`http://localhost:${http.port}/attestation`)).json();
+      const a: any = await (await fetch(`http://localhost:${http.port}/attestation`, { headers: { "x-bulkhead-proxy-secret": S("d") } })).json();
       expect(Object.keys(a.prompt_sha256)).toEqual(["1", "2", "3"]);
       expect(a.checksum).toMatch(/^[0-9a-f]{64}$/);
       expect((await fetch(`http://localhost:${http.port}/attempt`, { method: "POST", body: "{}" })).status).toBe(403);

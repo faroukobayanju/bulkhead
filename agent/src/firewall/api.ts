@@ -6,11 +6,12 @@ import { normalize } from "../normalize";
 import type { Budget } from "./budget";
 import { heuristicScore } from "./heuristics";
 import { DEGRADED_REASON, inputHash, judgeOut, signResponse, toVerdict, type Action, type Judge, type Msg, type Sign, type Technique } from "./verdict";
-import { ipKey, type SlidingWindow } from "./window";
+import { ipKey, SlidingWindow } from "./window";
 
 export type { Judge };
-export const FIREWALL_VERSION = process.env.FIREWALL_VERSION ?? "fw-v1";
-export const CODEHASH = process.env.CODEHASH ?? "local";
+// Defaults for tests and local use only. Production passes the real values from config (codehash, firewallVersion), never env.
+export const FIREWALL_VERSION = "fw-v1";
+export const CODEHASH = "local";
 
 export type CheckReq = { messages: Msg[]; proposed_action?: Action };
 export type FirewallResult = {
@@ -26,12 +27,12 @@ export type FirewallResult = {
 
 // Final risk is max(heuristic, judge): a judge that was itself talked into saying 0 cannot lower the heuristic score.
 // Anything that goes wrong (judge error, timeout, output outside the contract, even a bug here) is the fail-closed block.
-export async function checkFirewall(req: CheckReq, judge: Judge, opts: { timeoutMs?: number } = {}): Promise<FirewallResult> {
+export async function checkFirewall(req: CheckReq, judge: Judge, opts: { timeoutMs?: number; codehash?: string; firewallVersion?: string } = {}): Promise<FirewallResult> {
   const t0 = performance.now();
   const done = (r: Pick<FirewallResult, "verdict" | "risk" | "technique" | "reason" | "degraded">): FirewallResult => ({
     ...r,
-    firewall_version: FIREWALL_VERSION,
-    codehash: CODEHASH,
+    firewall_version: opts.firewallVersion ?? FIREWALL_VERSION,
+    codehash: opts.codehash ?? CODEHASH,
     latency_ms: Math.round(performance.now() - t0),
   });
   const ac = new AbortController();
@@ -115,12 +116,35 @@ export type FirewallDeps = {
   proxySecret?: string; // the web proxy's x-bulkhead-proxy-secret; unset closes the playground
   sign: Sign;
   signer: string;
+  codehash?: string; // from config, reported in every verdict
+  firewallVersion?: string;
+  lookupLimiter?: SlidingWindow; // unknown-key lookups per client address, before Convex (default 30 a minute)
   clock?: () => number;
   timeoutMs?: number;
 };
 
+const KEY_NEG_TTL_MS = 60_000;
+const KEY_POS_TTL_MS = 30_000;
+const KEY_CACHE_MAX = 10_000;
+const LOOKUPS_PER_MIN = 30;
+
 // Nothing is logged here: Task 9's error handler decides what to record.
 export function firewallRoutes(app: Hono, deps: FirewallDeps) {
+  // Keys are looked up in Convex. Answers are cached briefly (a flood of one unknown key costs one lookup a minute) and the lookups
+  // that do reach Convex are limited per client address, so a stream of random keys cannot turn into a stream of database calls.
+  // ponytail: a revoked key still works for up to 30 s; the peer address behind a proxy is the proxy, so the limit is then shared.
+  const keyCache = new Map<string, { ok: boolean; until: number }>();
+  const lookupLimiter = deps.lookupLimiter ?? new SlidingWindow();
+  const lookup = async (apiKey: string, ip: string, now: number): Promise<boolean | "limited"> => {
+    const h = sha(apiKey).toString("hex");
+    const hit = keyCache.get(h);
+    if (hit && hit.until > now) return hit.ok;
+    if (lookupLimiter.hit(`kl:${ip}`, LOOKUPS_PER_MIN, now)) return "limited";
+    const ok = await deps.keys(apiKey);
+    if (keyCache.size >= KEY_CACHE_MAX) keyCache.delete(keyCache.keys().next().value!);
+    keyCache.set(h, { ok, until: now + (ok ? KEY_POS_TTL_MS : KEY_NEG_TTL_MS) });
+    return ok;
+  };
   const fail = (c: Context, status: ContentfulStatusCode, code: string, message: string, fix: string, headers?: Record<string, string>) =>
     c.json({ error: { code, message, fix } }, status, headers);
 
@@ -133,12 +157,16 @@ export function firewallRoutes(app: Hono, deps: FirewallDeps) {
     let keyId: string | undefined;
     let perMinute: number;
     if (apiKey) {
-      let known = false;
+      let known: boolean | "limited" = false;
+      // the address is believed only from the proxy; a direct caller is keyed by the connection's peer
+      const peer = (c.env as { requestIP?: (r: Request) => { address: string } | null } | undefined)?.requestIP?.(c.req.raw)?.address;
+      const from = sameSecret(c.req.header("x-bulkhead-proxy-secret"), deps.proxySecret) && isIP(c.req.header("x-real-ip") ?? "") ? ipKey(c.req.header("x-real-ip")!) : peer ?? "unknown";
       try {
-        known = apiKey.length <= 256 && (await deps.keys(apiKey));
+        known = apiKey.length <= 256 && (await lookup(apiKey, from, now));
       } catch {
         return fail(c, 503, "key_lookup_unavailable", "API keys cannot be checked right now.", "Retry in a moment.");
       }
+      if (known === "limited") return fail(c, 429, "rate_limited", "Too many unknown API keys from this address.", "Wait a minute, then retry with a valid key.", { "retry-after": "60" });
       if (!known) return fail(c, 401, "invalid_api_key", "Unknown API key.", "Send a valid key in the x-api-key header.");
       keyId = sha(apiKey).toString("hex").slice(0, 32);
       [id, perMinute] = [`k:${keyId}`, 60];
@@ -187,7 +215,7 @@ export function firewallRoutes(app: Hono, deps: FirewallDeps) {
 
     // 6. judge, then sign. A degraded block is still a 200: reason stays "judge_unavailable" and the header marks it.
     // input_hash and issued_at go inside the signed bytes, so a verdict cannot be shown next to another input or passed off as new.
-    const { degraded, ...result } = await checkFirewall(req, deps.judge, { timeoutMs: deps.timeoutMs });
+    const { degraded, ...result } = await checkFirewall(req, deps.judge, { timeoutMs: deps.timeoutMs, codehash: deps.codehash, firewallVersion: deps.firewallVersion });
     const stamped = { ...result, input_hash, issued_at: Math.floor((deps.clock ?? Date.now)()) };
     try {
       return c.json(await signResponse(stamped, deps.signer, deps.sign), 200, degraded ? { "x-firewall-degraded": "1" } : undefined);

@@ -631,3 +631,53 @@ describe("keys are never logged", () => {
     expect(await r.text()).not.toContain(KEY_A);
   });
 });
+
+describe("key lookups are cached and limited before Convex", () => {
+  const withIp = (s: ReturnType<typeof setup>, key: string, ip = "203.0.113.7") => s.post(MSG, { "x-api-key": key, "x-bulkhead-proxy-secret": SECRET, "x-real-ip": ip });
+  test("an unknown key is looked up once a minute however often it is sent, and tried again after", async () => {
+    let lookups = 0;
+    const s = setup({ keys: async () => (lookups++, false) });
+    for (let i = 0; i < 5; i++) expect((await s.withKey(MSG, "dm_unknown")).status).toBe(401);
+    expect(lookups).toBe(1);
+    s.clock.now += 60_001;
+    await s.withKey(MSG, "dm_unknown");
+    expect(lookups).toBe(2);
+  });
+  test("a valid key is cached for 30 s, and a failed lookup is not cached", async () => {
+    let lookups = 0;
+    let down = true;
+    const s = setup({ keys: async k => { lookups++; if (down) throw new Error("x"); return k === KEY_A; } });
+    expect((await s.withKey()).status).toBe(503);
+    expect((await s.withKey()).status).toBe(503);
+    expect(lookups).toBe(2);
+    down = false;
+    for (let i = 0; i < 3; i++) expect((await s.withKey()).status).toBe(200);
+    expect(lookups).toBe(3);
+    s.clock.now += 30_001;
+    await s.withKey();
+    expect(lookups).toBe(4);
+  });
+  test("random keys from one address stop reaching the database after 30 a minute; another address is unaffected", async () => {
+    let lookups = 0;
+    const s = setup({ keys: async () => (lookups++, false) });
+    const codes: number[] = [];
+    for (let i = 0; i < 35; i++) codes.push((await withIp(s, `dm_random_${i}`)).status);
+    expect(codes.slice(0, 30).every(c => c === 401)).toBe(true);
+    expect(codes.slice(30)).toEqual([429, 429, 429, 429, 429]);
+    expect(lookups).toBe(30);
+    const r = await withIp(s, "dm_random_x", "198.51.100.9");
+    expect(r.status).toBe(401);
+    expect(lookups).toBe(31);
+    const limited = await withIp(s, "dm_random_y");
+    expect(limited.headers.get("retry-after")).toBe("60");
+    expect(await errCode(limited)).toBe("rate_limited");
+  });
+});
+
+describe("codehash and firewall_version come from the deps, not env", () => {
+  test("a verdict carries the configured values, signed", async () => {
+    const s = setup({ deps: { codehash: "ab".repeat(32), firewallVersion: "fw-v9" } });
+    const j: any = await (await s.withKey()).json();
+    expect(j).toMatchObject({ codehash: "ab".repeat(32), firewall_version: "fw-v9" });
+  });
+});
