@@ -61,6 +61,35 @@ export const finish = internalMutation({
   },
 });
 
+// Written before the release call is sent. Only a `releasing` row takes it, and only once (the same values again are a no-op).
+export const markSent = internalMutation({
+  args: { id: v.string(), release_tx: v.string(), release_ref_height: v.number() },
+  handler: async (ctx, a) => {
+    const row = await byId(ctx, a.id);
+    if (!row) return fail("not_found", "attempt");
+    if (row.outcome !== "releasing") return fail("bad_transition", `${row.outcome} cannot take a release tx`);
+    if (a.release_tx.length > 64 || !Number.isInteger(a.release_ref_height) || a.release_ref_height < 0) fail("bad_request", "release_tx or release_ref_height");
+    if (row.release_tx !== undefined && row.release_tx !== a.release_tx) return fail("conflict", "release_tx already set");
+    await ctx.db.patch(row._id, { release_tx: a.release_tx, release_ref_height: a.release_ref_height });
+    return null;
+  },
+});
+
+// The payout work list (agent only): rows still `releasing` or `signed_pending_broadcast`, plus `drained` rows since `drained_since`
+// (their spent coins and nonces must not be picked again before they confirm). Needed fields only, each outcome bounded.
+const PAYOUT_TAKE = 200;
+export const payouts = internalQuery({
+  args: { drained_since: v.string() },
+  handler: async (ctx, a) => {
+    const rows = [
+      ...(await ctx.db.query("attempts").withIndex("by_outcome_ts", q => q.eq("outcome", "releasing")).order("desc").take(PAYOUT_TAKE)),
+      ...(await ctx.db.query("attempts").withIndex("by_outcome_ts", q => q.eq("outcome", "signed_pending_broadcast")).order("desc").take(PAYOUT_TAKE)),
+      ...(await ctx.db.query("attempts").withIndex("by_outcome_ts", q => q.eq("outcome", "drained").gte("ts", a.drained_since)).order("desc").take(PAYOUT_TAKE)),
+    ];
+    return rows.map(r => ({ id: r.id, tier: r.tier, outcome: r.outcome, ts: r.ts, near_tx: r.near_tx, release_tx: r.release_tx ?? null, release_ref_height: r.release_ref_height ?? null }));
+  },
+});
+
 // The whole stored row (agent only), so the agent can sign the row as it will read after an update.
 export const getFull = internalQuery({
   args: { id: v.string() },

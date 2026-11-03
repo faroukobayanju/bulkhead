@@ -64,6 +64,8 @@ describe("a client with no secret cannot write through anything", () => {
     attempt_insert: wireRow(),
     attempt_finish: { id: wireRow().id, outcome: "drained" },
     attempt_get: { id: wireRow().id },
+    attempt_sent: { id: wireRow().id, release_tx: "t".repeat(44), release_ref_height: 1 },
+    attempts_payouts: { drained_since: "" },
     attempt_stage: { id: wireRow().id, stage: "done" },
     attempt_report: { attempt_id: wireRow().id, account_hash: H("1") },
     attempts_export: { since: "", cursor: null, limit: 10 },

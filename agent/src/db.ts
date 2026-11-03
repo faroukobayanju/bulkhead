@@ -166,6 +166,14 @@ export function makeDb(o: { fetch: typeof fetch; siteUrl: string; secret: string
       }
       await call("attempt_finish", { id, outcome, ...(reply !== undefined && { reply: wf(reply) }), ...(near_tx !== undefined && { near_tx }), ...(chain_txid !== undefined && { chain_txid }), ...sealed });
     },
+    // E6: the release tx hash and its reference height, written before the call is sent
+    async markSent(id: string, r: { tx: string; refHeight: number }) {
+      await call("attempt_sent", { id, release_tx: r.tx, release_ref_height: r.refHeight });
+    },
+    // Rows still `releasing` or `signed_pending_broadcast`, and `drained` ones since `drainedSince`
+    async listPayouts(drainedSince: string) {
+      return (await call("attempts_payouts", { drained_since: drainedSince })) as { id: string; tier: 1 | 2 | 3; outcome: string; ts: string; near_tx: string | null; release_tx: string | null; release_ref_height: number | null }[];
+    },
     // false: nothing changed (the row does not exist yet, or the stage is not forward of the stored one)
     async setStage(id: string, stage: Stage) {
       return bool(await call("attempt_stage", { id, stage }));

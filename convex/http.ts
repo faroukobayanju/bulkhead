@@ -16,6 +16,8 @@ export const OPS: Record<string, ReturnType<typeof op>> = {
   attempt_insert: op("attempts:insert", attempts.insert),
   attempt_finish: op("attempts:finish", attempts.finish),
   attempt_get: op("attempts:getFull", attempts.getFull),
+  attempt_sent: op("attempts:markSent", attempts.markSent),
+  attempts_payouts: op("attempts:payouts", attempts.payouts),
   attempt_stage: op("attempts:setStage", attempts.setStage),
   attempt_report: op("attempts:report", attempts.report),
   attempts_export: op("attempts:exportPage", attempts.exportPage),

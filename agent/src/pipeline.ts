@@ -109,6 +109,8 @@ export type PipelineDeps = {
   codehash: string;
   btcHrp: Hrp; // "bc" on mainnet, "tb" on testnet
   locks: Set<number>;
+  // Which attempt holds each lock, so the rebroadcast loop (onSettled) frees only the lock of the attempt it settled.
+  lockedBy?: Map<number, string>;
   stage?: (id: string, stage: Stage) => void | Promise<void>; // never awaited: a stage that fails or hangs cannot stop an attempt
   warn?: (what: "update_failed" | "stage_failed" | "was_signed_failed", id: string, error: unknown) => void;
   newId?: () => string;
@@ -276,13 +278,18 @@ export async function runAttempt(d: PipelineDeps, inp: PipelineInput): Promise<A
     throw new TierClosedError({ outcome: "won_race_lost", reply: clip(out.text) });
   }
   d.locks.add(tier);
+  d.lockedBy?.set(tier, id);
+  const unlock = () => {
+    d.locks.delete(tier);
+    if (d.lockedBy?.get(tier) === id) d.lockedBy.delete(tier);
+  };
 
   // Persist first: a payout cannot happen without a row. If the row cannot be written, nothing is released.
   stage("signing");
   try {
     await insert("releasing", out.text, "signing");
   } catch (e) {
-    d.locks.delete(tier);
+    unlock();
     throw e;
   }
   const update = async (patch: AttemptPatch) => {
@@ -322,7 +329,7 @@ export async function runAttempt(d: PipelineDeps, inp: PipelineInput): Promise<A
     try {
       await update({ outcome: "drained", reply: out.text, ...(nearTx !== undefined && { near_tx: nearTx }), ...(chainTxid !== undefined && { chain_txid: chainTxid }) });
     } finally {
-      d.locks.delete(tier); // E14: a won round, so the next round can run once the contract's cooldown ends
+      unlock(); // E14: a won round, so the next round can run once the contract's cooldown ends
     }
     stage("done");
     return { id, outcome: "drained", reply: clip(out.text), ...(nearTx !== undefined && { txs: { nearTx, ...(chainTxid !== undefined && { chainTxid }) } }), ...firewall() };
@@ -336,7 +343,7 @@ export async function runAttempt(d: PipelineDeps, inp: PipelineInput): Promise<A
   try {
     await update({ outcome: "release_failed", reply: COPY.failed });
   } finally {
-    d.locks.delete(tier);
+    unlock();
   }
   stage("done");
   return { id, outcome: "release_failed", reply: COPY.failed, ...firewall() };

@@ -162,6 +162,7 @@ export function makeServer(d: ServerDeps) {
   const limiter = d.limiter ?? new RateLimiter();
   const sessionWindow = new SlidingWindow();
   const locks = new Set<number>();
+  const lockedBy = new Map<number, string>();
   const attempts = new Map<string, Entry>(); // ponytail: in-memory, swept by age; the database answers for anything older or after a restart
   const log = d.log ?? (() => {});
   const alert: Alert = (k, x) => {
@@ -314,6 +315,7 @@ export function makeServer(d: ServerDeps) {
           codehash: d.cfg.codehash,
           btcHrp: d.cfg.btcHrp,
           locks,
+          lockedBy,
           stage: async (aid, s) => {
             if (s !== "done") e.stage = s; // "done" is set with the result, so a poll never sees done without one
             await d.db.setStage(aid, s);
@@ -452,6 +454,16 @@ export function makeServer(d: ServerDeps) {
   app.get("/health", c => c.json({ ok: true, mock: d.cfg.mock }));
 
   // The rebroadcast loop calls this when it settles a tier, so the process-local lock the pipeline kept (a paid tier) is freed.
-  const onSettled = (tier: Tier) => void locks.delete(tier);
-  return { app, locks, onSettled };
+  // The rebroadcast loop settles an attempt: its lock is freed only while that attempt still holds it, never one a live attempt took since.
+  const onSettled = (tier: Tier, attemptId: string) => {
+    if (lockedBy.get(tier) !== attemptId) return;
+    lockedBy.delete(tier);
+    locks.delete(tier);
+  };
+  // At startup: a payout still in flight from before the restart keeps its tier shut.
+  const adopt = (tier: Tier, attemptId: string) => {
+    locks.add(tier);
+    lockedBy.set(tier, attemptId);
+  };
+  return { app, locks, lockedBy, onSettled, adopt };
 }

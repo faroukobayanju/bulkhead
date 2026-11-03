@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { encodeFunctionData, keccak256, parseAbi, serializeTransaction, type Hex } from "viem";
 import { privateKeyToAccount, sign } from "viem/accounts";
-import { assembleSigned, GAS_LIMIT, makeBase, MAX_FEE_PER_GAS, NoGasFundsError } from "../src/chain/base";
+import { assembleSigned, GAS_LIMIT, makeBase, MAX_FEE_PER_GAS, nonceOfTx, NoGasFundsError } from "../src/chain/base";
 
 const USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
 const KEY = ("0x" + "11".repeat(32)) as Hex;
@@ -143,5 +143,50 @@ describe("broadcast", () => {
   });
   test("any other refusal throws", async () => {
     await expect(node({ eth_sendRawTransaction: () => { throw new Error("insufficient funds for gas"); } }).base().broadcast(raw)).rejects.toThrow();
+  });
+});
+
+describe("no RPC URL (or key in it) in any error (item 3)", () => {
+  const SECRET_URL = "https://base-mainnet.example.com/v2/FAKE-KEY-0123456789abcdef";
+  const everywhere = (e: unknown) => JSON.stringify([String((e as Error)?.message), String((e as Error)?.stack), Object.getOwnPropertyNames(e as object).map(k => String((e as any)[k]))]);
+  // each of these makes viem fail in a different way: the connection dies, the node answers 500, the node returns an RPC error
+  const modes: Record<string, typeof fetch> = {
+    "connection error carrying the url": (async (url: string) => { throw new TypeError(`fetch failed for ${url}`); }) as unknown as typeof fetch,
+    "http 500 with the url in the body": (async (url: string) => new Response(`bad gateway from ${url}`, { status: 500 })) as unknown as typeof fetch,
+    "rpc error naming the url": (async (url: string) => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32000, message: `rate limited ${url}` } }))) as unknown as typeof fetch,
+  };
+  const calls: [string, (b: ReturnType<typeof makeBase>) => Promise<unknown>][] = [
+    ["chainId", b => b.chainId()],
+    ["usdcBalance", b => b.usdcBalance(TO, USDC)],
+    ["nonce", b => b.nonce(TO)],
+    ["fees", b => b.fees()],
+    ["checkGas", b => b.checkGas(TO, GAS_LIMIT, 1n)],
+    ["broadcast", b => b.broadcast("0x02" + "ab".repeat(20))],
+  ];
+  for (const [mode, f] of Object.entries(modes)) {
+    for (const [name, run] of calls) {
+      test(`${name}, ${mode}`, async () => {
+        const err = await run(makeBase({ fetch: f, rpcUrl: SECRET_URL })).then(() => null, e => e);
+        expect(err).toBeInstanceOf(Error);
+        const all = everywhere(err);
+        expect(all).not.toContain("FAKE-KEY");
+        expect(all).not.toContain("base-mainnet.example.com");
+      });
+    }
+  }
+  test("NoGasFundsError is still a NoGasFundsError", async () => {
+    const f = (async (_u: string, init: RequestInit) => new Response(JSON.stringify({ jsonrpc: "2.0", id: JSON.parse(init.body as string).id, result: "0x1" }))) as unknown as typeof fetch;
+    await expect(makeBase({ fetch: f, rpcUrl: SECRET_URL }).checkGas(TO, GAS_LIMIT, 1_000n)).rejects.toBeInstanceOf(NoGasFundsError);
+  });
+  test("chainId returns the number", async () => {
+    expect(await node({ eth_chainId: () => "0x14a34" }).base().chainId()).toBe(84532);
+  });
+});
+
+describe("nonceOfTx", () => {
+  test("reads the nonce of an unsigned or signed tx", async () => {
+    expect(nonceOfTx(unsigned)).toBe(7);
+    const sig = await mpcSig(keccak256(unsigned));
+    expect(nonceOfTx(await assembleSigned(unsigned, sig, acct.address))).toBe(7);
   });
 });

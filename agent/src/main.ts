@@ -18,10 +18,10 @@ import { makeArenaFirewall } from "./pipeline";
 import { RateLimiter } from "./ratelimit";
 import { makeAlert, makeServer, type ChainDeps } from "./server";
 
-export type Started = { http: ReturnType<typeof Bun.serve>; stop: () => Promise<void> };
+export type Started = { http: ReturnType<typeof Bun.serve>; stop: () => Promise<void>; locks: ReadonlySet<number>; lockedBy: ReadonlyMap<number, string> };
 
-// `o.fetch` and `o.rebroadcastMs` exist for tests; production passes neither.
-export async function start(env: Record<string, string | undefined> = process.env, out: (line: string) => void = console.error, o: { fetch?: typeof fetch; rebroadcastMs?: number } = {}): Promise<Started> {
+// `o.fetch`, `o.port`, `o.rebroadcastMs` and `o.rebroadcastFirstMs` exist for tests; production passes neither.
+export async function start(env: Record<string, string | undefined> = process.env, out: (line: string) => void = console.error, o: { fetch?: typeof fetch; port?: number; rebroadcastMs?: number; rebroadcastFirstMs?: number } = {}): Promise<Started> {
   const cfg = loadConfig(env);
   const f = o.fetch ?? fetch;
   const clock = Date.now;
@@ -61,15 +61,18 @@ export async function start(env: Record<string, string | undefined> = process.en
   }
 
   const viewAccessKey = makeViewAccessKey({ fetch: f, rpcUrl: cfg.nearRpc || "https://rpc.testnet.near.org" });
-  let settled = (_t: Tier) => {};
+  let settled = (_t: Tier, _id: string) => {};
   let chain: ChainDeps;
-  let startRebroadcast: ((x: { alert: typeof alert; intervalMs?: number; warn?: (what: string, id: string, e: unknown) => void }) => () => void) | undefined;
+  let startRebroadcast: ((x: { alert: typeof alert; intervalMs?: number; firstMs?: number; warn?: (what: string, id: string, e: unknown) => void }) => (() => void) & { idle: () => Promise<void> }) | undefined;
+  let pendingPayouts: (() => Promise<{ id: string; tier: Tier }[]>) | undefined;
   if (cfg.mock && !cfg.vaultAccount) {
     chain = (await import("./mock")).mockChain(viewAccessKey);
   } else {
-    const real = makeChainDeps(cfg, { db: db as never, onSettled: t => settled(t), fetch: f });
+    const real = makeChainDeps(cfg, { db: db as never, onSettled: (t, id) => settled(t, id), fetch: f });
     chain = { ...real, viewAccessKey };
     startRebroadcast = real.startRebroadcast;
+    pendingPayouts = real.pendingPayouts;
+    if (!cfg.mock) await real.check(); // BASE_RPC must be the chain the Base tier is on
   }
 
   // Public attempt rows, for ids this process no longer holds: Convex's public query, no secret.
@@ -110,14 +113,20 @@ export async function start(env: Record<string, string | undefined> = process.en
     log,
   });
   settled = server.onSettled;
-  // E6: the loop runs in this process, because only this process can free the tier lock.
-  const stopRebroadcast = startRebroadcast?.({ alert, intervalMs: o.rebroadcastMs, warn: (what, id, e) => log(what, { id, error: (e as Error)?.name ?? "unknown" }) });
-  const http = Bun.serve({ port: cfg.port, fetch: server.app.fetch });
+  // A payout still in flight from before this start keeps its tier shut: the process-local locks are rebuilt from the rows.
+  for (const p of (await pendingPayouts?.()) ?? []) server.adopt(p.tier, p.id);
+  const http = Bun.serve({ port: o.port ?? cfg.port, fetch: server.app.fetch });
+  // E6: the loop runs in this process, because only this process can free the tier lock. Started after the port is taken, so a
+  // failed bind leaves no timer behind.
+  const stopRebroadcast = startRebroadcast?.({ alert, intervalMs: o.rebroadcastMs, firstMs: o.rebroadcastFirstMs, warn: (what, id, e) => log(what, { id, error: (e as Error)?.name ?? "unknown" }) });
   out(JSON.stringify({ event: "listening", port: http.port, mock: cfg.mock, network: cfg.network }));
   return {
     http,
+    locks: server.locks,
+    lockedBy: server.lockedBy,
     stop: async () => {
       stopRebroadcast?.();
+      await stopRebroadcast?.idle(); // a run already going finishes before the server is reported stopped
       await http.stop(true);
     },
   };

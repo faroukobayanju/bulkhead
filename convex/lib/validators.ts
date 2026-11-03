@@ -58,4 +58,8 @@ export const attemptFields = {
   signature: v.optional(v.string()),
   signer: v.optional(v.string()),
   response_verified: v.optional(v.boolean()),
+  // Recovery state (E6), not public and not signed: the NEAR tx hash of the release call and the block height it refers to, written
+  // before the call is sent, so a restart can tell a payout in flight from one that never left.
+  release_tx: v.optional(v.string()),
+  release_ref_height: v.optional(v.number()),
 };

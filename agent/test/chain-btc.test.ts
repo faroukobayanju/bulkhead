@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils";
-import { assembleSigned, BroadcastError, makeBtc, pickUtxo, tierAddress, txidOfLegacy, txidOfSigned, type Utxo } from "../src/chain/btc";
+import { assembleSigned, BroadcastError, inputsOf, makeBtc, pickUtxo, tierAddress, txidOfLegacy, txidOfSigned, type Utxo } from "../src/chain/btc";
 import { PUB, sighash, sign, unsignedTx } from "./chain-fixtures";
 
 // docs/spikes.md S1: the derived key of tier 1 and the address the faucet funded, which the contract then spent.
@@ -126,6 +126,57 @@ describe("mempool client", () => {
     for (const msg of ["txn-already-in-mempool", "Transaction already in block chain"]) {
       const b = makeBtc({ fetch: fake(() => new Response(msg, { status: 400 })).f, base: BASE });
       expect(await b.broadcast(signed)).toBe(txidOfLegacy(hex));
+    }
+  });
+});
+
+describe("the S1 transaction (item 13)", () => {
+  test("the rebuilt unsigned layout has the txid of the transaction that confirmed on testnet4", () => {
+    expect(txidOfLegacy(unsignedTx().hex)).toBe("a8ecea7c06b387f86349322cf025233c3f170e69a2a31f27e274e70ae89e8b1a");
+  });
+});
+
+describe("inputsOf", () => {
+  test("names the coin an unsigned or signed tx spends, in the txid:vout the UTXO list uses", () => {
+    const { hex } = unsignedTx();
+    const sh = bytesToHex(sighash(PUB, 341_067));
+    const signed = assembleSigned(hex, sign(hexToBytes(sh)), bytesToHex(PUB), sh);
+    expect(inputsOf(hex)).toEqual(["b7a37d34906d713f2436c3992495118f06a59f26f6acdcb3c5d3224959048bd1:0"]);
+    expect(inputsOf(signed)).toEqual(inputsOf(hex));
+  });
+});
+
+describe("pickUtxo with coins already spent by a stored tx", () => {
+  test("an excluded coin is skipped even when it is the largest", () => {
+    const coins = [u(900_000, "cc".repeat(32)), u(500_000, "dd".repeat(32))];
+    expect(pickUtxo(coins, 2_000_000n, 2, new Set(["cc".repeat(32) + ":0"]))?.txid).toBe("dd".repeat(32));
+    expect(pickUtxo(coins, 2_000_000n, 2, new Set(coins.map(c => `${c.txid}:0`)))).toBeNull();
+  });
+});
+
+describe("broadcasting a tx that already confirmed (item 6)", () => {
+  const BASE = "https://mempool.test/testnet4/api";
+  const { hex } = unsignedTx();
+  const sh = bytesToHex(sighash(PUB, 341_067));
+  const signed = assembleSigned(hex, sign(hexToBytes(sh)), bytesToHex(PUB), sh);
+  const TXID = txidOfLegacy(hex);
+  const spent = "sendrawtransaction RPC error: {\"code\":-25,\"message\":\"bad-txns-inputs-missingorspent\"}";
+  function net(status: () => Response) {
+    const urls: string[] = [];
+    const f = (async (url: string, init?: RequestInit) => {
+      urls.push(`${init?.method ?? "GET"} ${url}`);
+      return url.endsWith("/tx") ? new Response(spent, { status: 400 }) : status();
+    }) as unknown as typeof fetch;
+    return { b: makeBtc({ fetch: f, base: BASE }), urls };
+  }
+  test("the tx is confirmed: it counts as sent, with the txid computed from the hex", async () => {
+    const n = net(() => new Response(JSON.stringify({ confirmed: true, block_height: 158586 })));
+    expect(await n.b.broadcast(signed)).toBe(TXID);
+    expect(n.urls).toEqual([`POST ${BASE}/tx`, `GET ${BASE}/tx/${TXID}/status`]);
+  });
+  test("the tx is unknown (404), or known but unconfirmed, or the lookup fails: still a failure", async () => {
+    for (const st of [() => new Response("Transaction not found", { status: 404 }), () => new Response(JSON.stringify({ confirmed: false })), () => { throw new Error("down"); }]) {
+      await expect(net(st).b.broadcast(signed)).rejects.toBeInstanceOf(BroadcastError);
     }
   });
 });

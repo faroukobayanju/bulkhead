@@ -44,12 +44,14 @@ export function tierAddress(derived: string, hrp: Hrp): string {
 
 /** The largest confirmed UTXO that is at most `maxRelease` and big enough to pay the fee and leave a non-dust output.
  *  The contract also wants fee * 10 <= value, so that is the floor. Dust sent to the tier later is ignored. */
-export function pickUtxo(utxos: Utxo[], maxRelease: bigint, feeRate: number): Utxo | null {
-  const fee = OUT_VSIZE * feeRate;
-  const floor = Math.max(DUST + fee, fee * 10);
+export const floorSat = (feeRate: number) => Math.max(DUST + OUT_VSIZE * feeRate, OUT_VSIZE * feeRate * 10);
+
+/** `exclude` holds "txid:vout" of coins a stored signed tx already spends: they can still look unspent until that tx confirms. */
+export function pickUtxo(utxos: Utxo[], maxRelease: bigint, feeRate: number, exclude: ReadonlySet<string> = new Set()): Utxo | null {
+  const floor = floorSat(feeRate);
   let best: Utxo | null = null;
   for (const u of utxos) {
-    if (BigInt(u.value_sat) > maxRelease || u.value_sat < floor) continue;
+    if (exclude.has(`${u.txid}:${u.vout}`) || BigInt(u.value_sat) > maxRelease || u.value_sat < floor) continue;
     if (!best || u.value_sat > best.value_sat || (u.value_sat === best.value_sat && u.txid < best.txid)) best = u;
   }
   return best;
@@ -87,6 +89,22 @@ export function assembleSigned(unsignedHex: string, sig: Sig, pubkey: string, si
   const w = concatBytes(der(r, s), Uint8Array.of(1)); // SIGHASH_ALL
   const witness = concatBytes(Uint8Array.of(2, w.length), w, Uint8Array.of(pk.length), pk);
   return bytesToHex(concatBytes(tx.slice(0, 4), Uint8Array.of(0, 1), tx.slice(4, -4), witness, tx.slice(-4)));
+}
+
+/** The coins ("txid:vout") a tx, legacy or segwit layout, spends. */
+export function inputsOf(hex: string): string[] {
+  const b = hexToBytes(hex);
+  let p = b[4] === 0 && b[5] === 1 ? 6 : 4;
+  const n = b[p++]!;
+  if (n >= 0xfd) throw new Error("not a tx this agent built");
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) {
+    out.push(`${bytesToHex(rev(b.slice(p, p + 32)))}:${b[p + 32]! | (b[p + 33]! << 8) | (b[p + 34]! << 16) | (b[p + 35]! << 24)}`);
+    const sl = b[p + 36]!;
+    if (sl >= 0xfd) throw new Error("not a tx this agent built");
+    p += 36 + 1 + sl + 4;
+  }
+  return out;
 }
 
 /** txid of a legacy-layout (no witness) tx. */
@@ -147,6 +165,18 @@ export function makeBtc(o: { fetch: typeof fetch; base: string; timeoutMs?: numb
       const body = (await res.text()).trim();
       if (res.ok) return body;
       if (/already (in|known)|txn-already/i.test(body)) return txidOfSigned(hex);
+      // the coin is gone: if this very tx confirmed (a retry after a lost answer, or the first send landed), it is sent
+      if (/missingorspent/i.test(body)) {
+        let txid: string | null = null;
+        try {
+          txid = txidOfSigned(hex);
+        } catch {}
+        if (txid) {
+          const st = await o.fetch(`${o.base}/tx/${txid}/status`, { signal: t() }).catch(() => null);
+          const j: any = st?.ok ? await st.json().catch(() => null) : null;
+          if (j?.confirmed === true) return txid;
+        }
+      }
       throw new BroadcastError(res.status, body);
     },
   };

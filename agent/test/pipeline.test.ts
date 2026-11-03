@@ -692,6 +692,20 @@ describe("the lock (ruling 13)", () => {
     expect(rs.filter(r => r.status === "rejected" && r.reason instanceof TierClosedError).length).toBe(1);
   });
 
+  test("the lock records which attempt holds it: kept with a signed payout, gone after a won round or a failed release", async () => {
+    const lockedBy = new Map<number, string>();
+    const locks = new Set<number>();
+    const signed = await run({ locks, lockedBy, chat: win(), release: async () => { throw new BroadcastFailedError("ntx"); } });
+    expect(locks.has(1)).toBe(true);
+    expect(lockedBy.get(1)).toBe(signed.id);
+    locks.clear();
+    lockedBy.clear();
+    expect((await run({ locks, lockedBy, chat: win() })).outcome).toBe("drained");
+    expect(lockedBy.size).toBe(0);
+    expect((await run({ locks, lockedBy, chat: win(), release: async () => { throw new Error("boom"); }, wasSigned: async () => false })).outcome).toBe("release_failed");
+    expect(lockedBy.size).toBe(0);
+  });
+
   test("a lock on one tier does not block another", async () => {
     const locks = new Set<number>([1]);
     expect((await run({ locks, chat: win() }, inp(3))).outcome).toBe("drained");

@@ -13,20 +13,21 @@ import { BroadcastFailedError, type TierState } from "../pipeline";
 import type { Hrp } from "../address";
 import type { Base } from "./base";
 import { GAS_LIMIT, assembleSigned as assembleEvm } from "./base";
-import { assembleSigned as assembleBtc, makeBtc, pickUtxo, tierAddress, tierPubkey, type Btc } from "./btc";
-import { makeBase } from "./base";
+import { assembleSigned as assembleBtc, inputsOf, makeBtc, pickUtxo, tierAddress, tierPubkey, type Btc } from "./btc";
+import { makeBase, nonceOfTx } from "./base";
 import { startRebroadcast, type Payout } from "./rebroadcast";
 
 const RELEASE_GAS = 300n * 10n ** 12n; // E14b: never max gas, it reserves more than the key's allowance
 const ROOTS_GAS = 30n * 10n ** 12n;
 const TX_POLL_MS = 15_000; // the `tx` method itself holds a request for up to ~10 s while it waits for finality
+const REJECTED = new Set(["INVALID_TRANSACTION", "REQUEST_VALIDATION_ERROR"]); // the node refused the tx itself; INTERNAL_ERROR and TIMEOUT_ERROR prove nothing
 const TX_VALIDITY = 86_400; // blocks after the reference block that a transaction can still be included
 
 export type Signer = { publicKey: string; sign(msg: Uint8Array): Promise<Uint8Array> }; // ed25519, "ed25519:<base58>"; the TEE key later
 export type TierId = 1 | 2 | 3;
 
 export class RpcError extends Error {
-  constructor(public causeName: string | undefined, method: string) {
+  constructor(public causeName: string | undefined, method: string, public errName?: string) {
     super(`near rpc ${method}: ${causeName ?? "error"}`);
     this.name = "RpcError";
   }
@@ -80,6 +81,10 @@ export type VaultOpts = {
   base?: Base;
   hrp: Hrp;
   storeSignedTx: (r: { attempt_id: string; chain: "btc" | "evm"; hex: string }) => Promise<unknown>;
+  // E6: awaited before the release call is sent, so a restart knows which tx may be in flight. If it throws, nothing is sent.
+  markSent?: (attemptId: string, r: { tx: string; refHeight: number }) => Promise<unknown>;
+  // Coins and the highest nonce that stored signed txs of this tier already use, so a coin or nonce is never picked twice.
+  used?: (tier: number) => Promise<{ outpoints: ReadonlySet<string>; maxNonce: number }>;
   warn?: (what: string, id: string, e: unknown) => void;
   timeoutMs?: number; // per RPC call, 10 s (E22)
   finalWaitMs?: number; // how long release waits for FINAL, 120 s (E6)
@@ -109,7 +114,7 @@ export function makeVault(o: VaultOpts) {
     } catch {
       throw new Error(`near rpc ${method}: http ${res.status}`);
     }
-    if (j?.error) throw new RpcError(j.error.cause?.name ?? j.error.name, method);
+    if (j?.error) throw new RpcError(j.error.cause?.name ?? j.error.name, method, j.error.name);
     if (!res.ok || j === null || typeof j !== "object") throw new Error(`near rpc ${method}: http ${res.status}`);
     return j.result;
   }
@@ -125,7 +130,7 @@ export function makeVault(o: VaultOpts) {
   // One transaction at a time from the agent key, so two calls cannot pick the same nonce.
   let lock: Promise<unknown> = Promise.resolve();
   let lastNonce = 0;
-  function send(method: string, args: unknown, gas: bigint, onHash?: (h: { hash: string; refHeight: number }) => void): Promise<string> {
+  function send(method: string, args: unknown, gas: bigint, onHash?: (h: { hash: string; refHeight: number }) => Promise<void>): Promise<string> {
     const run = async () => {
       const pub = utils.PublicKey.from(o.signer.publicKey);
       const key = await rpc("query", { request_type: "view_access_key", finality: "optimistic", account_id: o.agentAccount, public_key: o.signer.publicKey });
@@ -136,7 +141,7 @@ export function makeVault(o: VaultOpts) {
       const signature = new transactions.Signature({ keyType: pub.keyType, data: await o.signer.sign(digest) });
       const signed = new transactions.SignedTransaction({ transaction: tx, signature });
       const hash = utils.serialize.base_encode(digest);
-      onHash?.({ hash, refHeight: Number(key.block_height) });
+      await onHash?.({ hash, refHeight: Number(key.block_height) });
       lastNonce = nonce;
       await rpc("broadcast_tx_async", [Buffer.from(signed.encode()).toString("base64")]);
       return hash;
@@ -158,8 +163,10 @@ export function makeVault(o: VaultOpts) {
       await sleep(pollMs);
     }
   }
+  // Only logs the vault contract itself wrote count: another contract could print the same words.
   const events = (r: any): any[] =>
     (r?.receipts_outcome ?? [])
+      .filter((x: any) => x?.outcome?.executor_id === o.vaultAccount)
       .flatMap((x: any) => x?.outcome?.logs ?? [])
       .filter((l: unknown) => typeof l === "string" && l.startsWith("EVENT_JSON:"))
       .map((l: string) => {
@@ -169,27 +176,51 @@ export function makeVault(o: VaultOpts) {
           return null;
         }
       })
-      .filter((e: any) => e?.standard === "bulkhead");
+      .filter((e: any) => e?.standard === "bulkhead" && e?.version === "1.0.0");
+  const derivedOf = (t: TierInfo) => view(o.signerAccount, "derived_public_key", { path: t.derivation_path, predecessor: o.vaultAccount, domain_id: 0 });
 
   // Chain state -> the contract's ReleasePayload (lib.rs). Nothing is sent until this and the gas check pass.
+  const chainOk = new Set<number>();
   async function payload(t: TierInfo, base: Base | undefined) {
     const max = BigInt(t.max_release);
+    const used = (await o.used?.(t.id)) ?? { outpoints: new Set<string>(), maxNonce: -1 };
     if (t.chain === "Bitcoin") {
       // the tier key must be the one the address was made from, or the MPC would sign for a key that cannot spend the coin
-      const derived = await view(o.signerAccount, "derived_public_key", { path: t.derivation_path, predecessor: o.vaultAccount, domain_id: 0 });
+      const derived = await derivedOf(t);
       if (tierAddress(derived, o.hrp) !== t.address) throw new Error("tier address does not match the derived key");
-      const [utxos, fee] = await Promise.all([o.btc.getUtxos(t.address), o.btc.feeRate()]);
+      const [all, fee] = await Promise.all([o.btc.getUtxos(t.address), o.btc.feeRate()]);
+      const utxos = all.filter(u => !used.outpoints.has(`${u.txid}:${u.vout}`)); // a coin a stored signed tx spends can look unspent until it confirms
       const u = pickUtxo(utxos, max, fee);
-      if (!u) throw new ContractRefusedError(utxos.length ? "ERR_OVER_CAP" : "ERR_NO_UTXOS");
+      if (!u) throw new ContractRefusedError(utxos.some(x => BigInt(x.value_sat) <= max) ? "ERR_DUST_ONLY" : utxos.length ? "ERR_OVER_CAP" : "ERR_NO_UTXOS");
       return { derived, body: { Bitcoin: { utxos: [u], fee_rate_sat_vb: fee } } };
     }
-    if (!base) throw new Error("no Base client configured");
+    if (!base) throw new Error("no Base RPC configured");
     if (!t.evm) throw new Error("Base tier has no evm config");
-    const [bal, nonce, fees] = await Promise.all([base.usdcBalance(t.address, t.evm?.usdc ?? ""), base.nonce(t.address), base.fees()]);
+    if (!chainOk.has(t.evm.chain_id)) {
+      const id = await base.chainId();
+      if (id !== t.evm.chain_id) throw new Error(`BASE_RPC is chain ${id}, the tier is chain ${t.evm.chain_id}`);
+      chainOk.add(id);
+    }
+    const [bal, pending, fees] = await Promise.all([base.usdcBalance(t.address, t.evm.usdc), base.nonce(t.address), base.fees()]);
+    const nonce = Math.max(pending, used.maxNonce + 1); // never a nonce a stored signed tx already holds
     const amount = bal < max ? bal : max;
     if (amount === 0n) throw new ContractRefusedError("ERR_NO_UTXOS");
     await base.checkGas(t.address, GAS_LIMIT, fees.maxFeePerGas); // NoGasFundsError
     return { derived: null, body: { Base: { nonce, max_fee_per_gas: fees.maxFeePerGas.toString(), max_priority_fee_per_gas: fees.maxPriorityFeePerGas.toString(), gas_limit: Number(GAS_LIMIT), usdc_amount: amount.toString() } } };
+  }
+
+  // The signed tx of an attempt from the `tx` result: release_signed (and, on Bitcoin, release_requested for the digest) checked
+  // against the tier key. Throws when the signature does not verify. null: the tx carries no release_signed for this attempt.
+  async function signedFrom(r: any, attemptId: string, t: TierInfo, derived: string | null): Promise<{ chain: "btc" | "evm"; hex: string } | null> {
+    const ev = events(r);
+    const signed = ev.find(e => e.event === "release_signed" && e.data?.attempt_id === attemptId)?.data;
+    if (!signed) return null;
+    const sig = { bigR: signed.signature.big_r.affine_point as string, s: signed.signature.s.scalar as string };
+    if (t.chain === "Bitcoin") {
+      const digest = ev.find(e => e.event === "release_requested" && e.data?.attempt_id === attemptId)?.data?.payload;
+      return { chain: "btc", hex: assembleBtc(signed.unsigned_tx_hex, sig, bytesToHex(tierPubkey(derived ?? (await derivedOf(t)))), digest) };
+    }
+    return { chain: "evm", hex: await assembleEvm(signed.unsigned_tx_hex, sig, t.address) };
   }
 
   async function release(tier: TierId, attemptId: string, recipient: string): Promise<{ nearTx: string; chainTxid: string }> {
@@ -200,9 +231,12 @@ export function makeVault(o: VaultOpts) {
     const args = { tier_id: tier, attempt_id: attemptId, recipient, payload: p.body };
     let hash: string;
     try {
-      hash = await send("release_funds", args, RELEASE_GAS, h => Object.assign(rec, { state: "sent", sender: o.agentAccount, ...h })); // recorded before the send: a lost answer must not look like "never sent"
+      hash = await send("release_funds", args, RELEASE_GAS, async h => {
+        await o.markSent?.(attemptId, { tx: h.hash, refHeight: h.refHeight }); // persisted first; a failure here sends nothing
+        Object.assign(rec, { state: "sent", sender: o.agentAccount, ...h }); // recorded before the send: a lost answer must not look like "never sent"
+      });
     } catch (e) {
-      if (e instanceof RpcError) rec.state = "rejected"; // the node answered no
+      if (e instanceof RpcError && rec.state === "sent" && (REJECTED.has(e.causeName ?? "") || REJECTED.has(e.errName ?? ""))) rec.state = "rejected"; // the node said the tx is invalid
       throw e;
     }
     const r = await waitFinal(hash);
@@ -212,9 +246,7 @@ export function makeVault(o: VaultOpts) {
       const m = JSON.stringify(fail).match(/Smart contract panicked: (ERR_[A-Z0-9_]+)/);
       throw m ? new ContractRefusedError(m[1]!) : new Error("release_funds failed on-chain");
     }
-    const ev = events(r);
-    const signed = ev.find(e => e.event === "release_signed" && e.data?.attempt_id === attemptId)?.data;
-    if (!signed) {
+    if (!events(r).some(e => e.event === "release_signed" && e.data?.attempt_id === attemptId)) {
       rec.final = "failed"; // release_failed event: the MPC did not sign, no round is spent, pending_tx is cleared
       throw new SignFailedError();
     }
@@ -222,20 +254,46 @@ export function makeVault(o: VaultOpts) {
 
     // The contract has signed. Nothing below may look like "failed before signing".
     try {
-      const sig = { bigR: signed.signature.big_r.affine_point as string, s: signed.signature.s.scalar as string };
-      const chain = t.chain === "Bitcoin" ? "btc" : "evm";
-      const hex =
-        t.chain === "Bitcoin"
-          ? assembleBtc(signed.unsigned_tx_hex, sig, bytesToHex(tierPubkey(p.derived!)), ev.find(e => e.event === "release_requested" && e.data?.attempt_id === attemptId).data.payload)
-          : await assembleEvm(signed.unsigned_tx_hex, sig, t.address);
-      // a failed store must not stop the broadcast: the money is owed either way, and the hex is also in the NEAR tx
-      await o.storeSignedTx({ attempt_id: attemptId, chain, hex }).catch(e => o.warn?.("store_failed", attemptId, e));
-      const chainTxid = chain === "btc" ? await o.btc.broadcast(hex) : await o.base!.broadcast(hex);
+      const s = (await signedFrom(r, attemptId, t, p.derived))!;
+      // a failed store must not stop the broadcast: the money is owed either way, and the hex is also in the NEAR tx (recoverSigned)
+      await o.storeSignedTx({ attempt_id: attemptId, ...s }).catch(e => o.warn?.("store_failed", attemptId, e));
+      const chainTxid = s.chain === "btc" ? await o.btc.broadcast(s.hex) : await o.base!.broadcast(s.hex);
       return { nearTx: hash, chainTxid };
     } catch (e) {
       o.warn?.("broadcast_failed", attemptId, e);
       throw new BroadcastFailedError(hash);
     }
+  }
+
+  // The signed tx of an attempt whose release call is known by hash, read back from the final NEAR tx. For a release that timed out
+  // in the pipeline: the signature is on-chain even though this process never saw it. null when the tx is not final yet or did not sign.
+  async function recoverSigned(hash: string, attemptId: string, tier: number) {
+    let r: any;
+    try {
+      r = await rpc("tx", { tx_hash: hash, sender_account_id: o.agentAccount, wait_until: "FINAL" }, TX_POLL_MS);
+    } catch (e) {
+      if (e instanceof RpcError && e.causeName === "UNKNOWN_TRANSACTION") return null;
+      throw e;
+    }
+    if (r?.final_execution_status !== "FINAL" || r.status?.Failure) return null;
+    return signedFrom(r, attemptId, await getTier(tier), null);
+  }
+
+  type Verdict = "signed" | "failed" | "null" | "notfinal" | "unknown" | "expired";
+  // What became of a release tx: a signature came back, it failed, the signer failed (null), it is still running, or the node does
+  // not know it (and whether it is past its 86,400-block validity, so it can never be included). Other RPC trouble throws.
+  async function txVerdict(hash: string, refHeight: number): Promise<Verdict> {
+    let r: any;
+    try {
+      r = await rpc("tx", { tx_hash: hash, sender_account_id: o.agentAccount, wait_until: "FINAL" }, TX_POLL_MS);
+    } catch (e) {
+      if (!(e instanceof RpcError && e.causeName === "UNKNOWN_TRANSACTION")) throw e;
+      const head = await rpc("block", { finality: "final" });
+      return Number(head?.header?.height) > refHeight + TX_VALIDITY ? "expired" : "unknown";
+    }
+    if (r?.final_execution_status !== "FINAL") return "notfinal";
+    if (r.status?.Failure) return "failed";
+    return Buffer.from(r.status?.SuccessValue ?? "", "base64").toString() === "null" ? "null" : "signed"; // anything but null may be a signature
   }
 
   async function tierOpen(tier: number): Promise<TierState> {
@@ -254,25 +312,21 @@ export function makeVault(o: VaultOpts) {
 
   // E6. `false` only when no tx of this attempt can still sign: the contract has no pending_tx for it AND the release tx is known
   // final-and-failed, was rejected or never sent, or expired. In flight, or nothing known (restart), throws: the pipeline then
-  // counts the attempt as signed, which only costs a held lock.
+  // counts the attempt as signed, which only costs a held lock. The tx is read before pending_tx, so a signature that lands
+  // between the two reads cannot be missed.
   async function wasSigned(tier: number, attemptId: string): Promise<boolean> {
+    const s = sent.get(attemptId);
+    let verdict: Verdict | null = null;
+    if (s?.state === "sent" && s.final !== "failed") {
+      verdict = await txVerdict(s.hash!, s.refHeight!);
+      if (verdict === "signed") return true;
+      if (verdict === "notfinal") throw new Error("release tx not final yet: outcome unknown");
+    }
     if ((await vaultView("get_pending_tx", { id: attemptId })) != null) return true;
     if (attemptOf(await getTier(tier)) === attemptId) return true;
-    const s = sent.get(attemptId);
     if (!s) throw new Error("no record of this release tx: outcome unknown");
     if (s.state === "unsent" || s.state === "rejected" || s.final === "failed") return false;
-    try {
-      const r = await rpc("tx", { tx_hash: s.hash, sender_account_id: s.sender, wait_until: "FINAL" }, TX_POLL_MS);
-      if (r?.final_execution_status !== "FINAL") throw new Error("release tx not final yet: outcome unknown");
-      if (r.status?.Failure) return false;
-      // success with no pending_tx can only be a signer failure, which returns null; anything else is a signature
-      const v = Buffer.from(r.status?.SuccessValue ?? "", "base64").toString();
-      return v !== "null";
-    } catch (e) {
-      if (!(e instanceof RpcError && e.causeName === "UNKNOWN_TRANSACTION")) throw e;
-    }
-    const head = await rpc("block", { finality: "final" });
-    if (Number(head?.header?.height) > s.refHeight! + TX_VALIDITY) return false; // expired: it can never be included
+    if (verdict === "failed" || verdict === "null" || verdict === "expired") return false;
     throw new Error("release tx unknown but not expired: outcome unknown");
   }
 
@@ -307,62 +361,97 @@ export function makeVault(o: VaultOpts) {
     viewAccessKey,
     logAttemptRoots,
     getTier,
+    recoverSigned,
+    txVerdict,
     pendingTx: (id: string): Promise<string | null> => vaultView("get_pending_tx", { id }),
   };
 }
 export type Vault = ReturnType<typeof makeVault>;
 
-// The ChainDeps of server.ts, built from the agent's config (src/main.ts loads this by name). The signing key is the testnet
+// The ChainDeps of server.ts, built from the agent's config (src/main.ts calls this). The signing key is the testnet
 // AGENT_PRIVATE_KEY; in the TEE the Shade Agent API supplies a `signer` instead (Task 10).
+type PayoutRow = { id: string; tier: 1 | 2 | 3; outcome: string; ts: string; near_tx: string | null; release_tx: string | null; release_ref_height: number | null };
 type ChainDb = {
   putSignedTx(r: { attempt_id: string; chain: "btc" | "evm"; hex: string }): Promise<boolean>;
   getSignedTx(id: string): Promise<{ chain: "btc" | "evm"; hex: string } | null>;
-  updateAttempt(id: string, p: { outcome: Payout["outcome"] | "drained" | "release_failed" | "broadcast_failed_terminal"; chain_txid?: string }): Promise<void>;
-  listAttempts(since: string, cursor: string | null, limit?: number): Promise<{ rows: Record<string, unknown>[]; next: string; done: boolean }>;
+  updateAttempt(id: string, p: { outcome: string; chain_txid?: string }): Promise<void>;
+  markSent(id: string, r: { tx: string; refHeight: number }): Promise<void>;
+  listPayouts(drainedSince: string): Promise<PayoutRow[]>;
   counter: Counter;
 };
-const PAYOUT_LOOKBACK_MS = 14 * 24 * 3600_000; // ponytail: a payout stuck for more than 14 days drops off the work list; add an outcome index query if that matters
+const DRAINED_LOOKBACK_MS = 24 * 3600_000; // a drained payout's coin and nonce are excluded for a day, by which time it has confirmed
 
-export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier) => void; fetch?: typeof fetch; signer?: Signer; clock?: () => number }) {
+export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier, attemptId: string) => void; fetch?: typeof fetch; signer?: Signer; clock?: () => number }) {
   const f = x.fetch ?? fetch;
   const kp = cfg.agentPrivateKey ? KeyPair.fromString(cfg.agentPrivateKey as never) : null;
   const signer = x.signer ?? (kp ? { publicKey: kp.getPublicKey().toString(), sign: async (m: Uint8Array) => kp.sign(m).signature } : null);
   if (!signer) throw new Error("no agent signing key");
+  const clock = x.clock ?? Date.now;
   const btc = makeBtc({ fetch: f, base: cfg.mempoolBase });
   const base = cfg.baseRpc ? makeBase({ fetch: f, rpcUrl: cfg.baseRpc }) : undefined;
+  const rows = () => x.db.listPayouts(new Date(clock() - DRAINED_LOOKBACK_MS).toISOString());
   const vault = makeVault({
     fetch: f, rpcUrl: cfg.nearRpc, vaultAccount: cfg.vaultAccount, agentAccount: cfg.agentAccount, hrp: cfg.btcHrp, signer, btc, base,
     signerAccount: cfg.network === "mainnet" ? "v1.signer" : "v1.signer-prod.testnet",
-    storeSignedTx: r => x.db.putSignedTx(r), clock: x.clock,
+    storeSignedTx: r => x.db.putSignedTx(r),
+    markSent: (id, r) => x.db.markSent(id, r),
+    // coins and nonces of this tier's stored signed txs that are not yet old enough to have confirmed
+    used: async tier => {
+      const outpoints = new Set<string>();
+      let maxNonce = -1;
+      for (const r of await rows()) {
+        if (r.tier !== tier) continue;
+        const s = await x.db.getSignedTx(r.id);
+        if (!s) continue;
+        if (s.chain === "btc") for (const c of inputsOf(s.hex)) outpoints.add(c);
+        else maxNonce = Math.max(maxNonce, nonceOfTx(s.hex));
+      }
+      return { outpoints, maxNonce };
+    },
+    clock: x.clock,
   });
-  const clock = x.clock ?? Date.now;
+  const pending = async (): Promise<Payout[]> =>
+    (await rows()).filter(r => r.outcome === "releasing" || r.outcome === "signed_pending_broadcast").map(r => ({ ...r, outcome: r.outcome as Payout["outcome"] }));
   return {
     release: (tier: Tier, attemptId: string, recipient: string) => vault.release(tier, attemptId, recipient),
     tierOpen: (tier: Tier) => vault.tierOpen(tier),
     wasSigned: (tier: Tier, attemptId: string) => vault.wasSigned(tier, attemptId),
     storeSignedTx: async (attemptId: string, chain: "btc" | "evm", hex: string) => void (await x.db.putSignedTx({ attempt_id: attemptId, chain, hex })),
     logAttemptRoots: vault.logAttemptRoots,
-    /** Starts the rebroadcast loop in this process; returns the stop function. */
-    startRebroadcast: (o: { alert: (kind: string, details: Record<string, unknown>) => void | Promise<void>; intervalMs?: number; warn?: (what: string, id: string, e: unknown) => void }) =>
+    /** The attempts a restart must treat as holding their tier: rows still `releasing` or `signed_pending_broadcast`. */
+    pendingPayouts: pending,
+    /** Startup check: BASE_RPC is the chain the Base tier is on. Throws on a mismatch; a vault with no Base tier passes. */
+    async check() {
+      if (!base) return;
+      let t: TierInfo;
+      try {
+        t = await vault.getTier(2);
+      } catch (e) {
+        if (String((e as Error).message).includes("ERR_BAD_TIER")) return;
+        throw e;
+      }
+      const id = await base.chainId();
+      if (t.evm && id !== t.evm.chain_id) throw new Error(`BASE_RPC is chain ${id}, the Base tier is chain ${t.evm.chain_id}`);
+    },
+    /** Starts the rebroadcast loop in this process; returns the stop function (its `idle()` waits for a run in progress). */
+    startRebroadcast: (o: { alert: (kind: string, details: Record<string, unknown>) => void | Promise<void>; intervalMs?: number; firstMs?: number; warn?: (what: string, id: string, e: unknown) => void }) =>
       startRebroadcast({
         ...o,
         clock,
         onSettled: x.onSettled,
         pendingTx: vault.pendingTx,
+        txVerdict: vault.txVerdict,
+        recover: p => vault.recoverSigned(p.release_tx!, p.id, p.tier),
         signedTx: id => x.db.getSignedTx(id),
-        update: (id, patch) => x.db.updateAttempt(id, patch as never),
+        storeSignedTx: (id, chain, hex) => x.db.putSignedTx({ attempt_id: id, chain, hex }),
+        update: (id, patch) => x.db.updateAttempt(id, patch),
         failures: x.db.counter,
-        broadcast: (chain, hex) => (chain === "btc" ? btc.broadcast(hex) : base!.broadcast(hex)),
-        payouts: async () => {
-          const since = new Date(clock() - PAYOUT_LOOKBACK_MS).toISOString();
-          const out: Payout[] = [];
-          for (let cursor: string | null = null; ; ) {
-            const pg = await x.db.listAttempts(since, cursor);
-            for (const r of pg.rows) if (r.outcome === "releasing" || r.outcome === "signed_pending_broadcast") out.push({ id: r.id as string, tier: r.tier as 1 | 2 | 3, outcome: r.outcome, ts: r.ts as string, near_tx: (r.near_tx as string | null) ?? null });
-            if (pg.done) return out;
-            cursor = pg.next;
-          }
+        broadcast: (chain, hex) => {
+          if (chain === "btc") return btc.broadcast(hex);
+          if (!base) throw new Error("no Base RPC configured");
+          return base.broadcast(hex);
         },
+        payouts: pending,
       }),
   };
 }

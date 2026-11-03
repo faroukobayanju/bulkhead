@@ -43,23 +43,34 @@ export async function assembleSigned(unsignedHex: string, sig: Sig, tierAddress:
   throw new Error("signature does not recover to the tier address");
 }
 
+// A viem error can carry the RPC URL (and with it the provider's API key) in its message or its meta. What leaves this file is
+// the short message only, with the URL cut out if it is in there anyway. The node's own words stay available for matching.
+const scrub = (url: string) => (e: unknown): never => {
+  const x = e as { shortMessage?: unknown };
+  const m = typeof x?.shortMessage === "string" ? x.shortMessage : "base rpc error";
+  throw new Error(m.split(url).join("[rpc]").slice(0, 200));
+};
+const detail = (e: unknown) => String((e as { details?: unknown })?.details ?? (e as Error)?.message ?? "");
+
 export function makeBase(o: { fetch: typeof fetch; rpcUrl: string; timeoutMs?: number }) {
   const client = createPublicClient({ transport: http(o.rpcUrl, { fetchFn: o.fetch, timeout: o.timeoutMs ?? 10_000, retryCount: 0 }) });
+  const w = <T>(p: Promise<T>): Promise<T> => p.catch(scrub(o.rpcUrl));
   return {
+    chainId: () => w(client.getChainId()),
     // the token address is the tier's own (get_tier.evm.usdc), never configuration
-    usdcBalance: (addr: string, usdc: string) => client.readContract({ address: usdc as Hex, abi: ERC20, functionName: "balanceOf", args: [addr as Hex] }),
+    usdcBalance: (addr: string, usdc: string) => w(client.readContract({ address: usdc as Hex, abi: ERC20, functionName: "balanceOf", args: [addr as Hex] })),
     // pending: a tx of the tier address that is still in the mempool owns the next nonce too
-    nonce: (addr: string) => client.getTransactionCount({ address: addr as Hex, blockTag: "pending" }),
+    nonce: (addr: string) => w(client.getTransactionCount({ address: addr as Hex, blockTag: "pending" })),
     /** Current fees, clamped to what the contract accepts. */
     async fees() {
-      const f = await client.estimateFeesPerGas();
+      const f = await w(client.estimateFeesPerGas());
       const maxFeePerGas = f.maxFeePerGas! < MAX_FEE_PER_GAS ? f.maxFeePerGas! : MAX_FEE_PER_GAS;
       const p = f.maxPriorityFeePerGas!;
       return { maxFeePerGas, maxPriorityFeePerGas: p < maxFeePerGas ? p : maxFeePerGas };
     },
     /** The tier address pays the gas itself (E-gas): refuse before calling the contract when it cannot. */
     async checkGas(addr: string, gasLimit: bigint, maxFeePerGas: bigint) {
-      const have = await client.getBalance({ address: addr as Hex });
+      const have = await w(client.getBalance({ address: addr as Hex }));
       const need = gasLimit * maxFeePerGas;
       if (have < need) throw new NoGasFundsError(have, need);
     },
@@ -70,12 +81,16 @@ export function makeBase(o: { fetch: typeof fetch; rpcUrl: string; timeoutMs?: n
         return await client.sendRawTransaction({ serializedTransaction: raw });
       } catch (e) {
         const hash = keccak256(raw);
-        if (/already known|known transaction|already imported/i.test(String((e as Error)?.message))) return hash;
+        const d = detail(e);
+        if (/already known|known transaction|already imported/i.test(d)) return hash;
         // "nonce too low" can mean this very tx was mined: it is sent if the chain has it
-        if (/nonce too low/i.test(String((e as Error)?.message)) && (await client.getTransaction({ hash }).catch(() => null))) return hash;
-        throw e;
+        if (/nonce too low/i.test(d) && (await client.getTransaction({ hash }).catch(() => null))) return hash;
+        return scrub(o.rpcUrl)(e);
       }
     },
   };
 }
 export type Base = ReturnType<typeof makeBase>;
+
+/** The nonce of a signed (or unsigned) EIP-1559 tx this agent stored. */
+export const nonceOfTx = (hex: string): number => Number(parseTransaction((hex.startsWith("0x") ? hex : "0x" + hex) as Hex).nonce ?? -1);

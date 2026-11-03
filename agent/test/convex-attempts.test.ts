@@ -253,3 +253,42 @@ describe("export", () => {
     expect((await s.post("attempts_export", { since: "", cursor: null, limit: 1001 })).status).toBe(400);
   });
 });
+
+describe("release tx and the payout work list (E6)", () => {
+  const sent = (id: string, tx = "t".repeat(44), h = 1000) => s.post("attempt_sent", { id, release_tx: tx, release_ref_height: h });
+  const finish = (id: string, outcome: string) => s.post("attempt_finish", { id, outcome });
+
+  test("a releasing row takes the hash and height; the same values again are fine, other values are a conflict" , async () => {
+    await insert({ outcome: "releasing" });
+    expect((await sent(wireRow().id)).status).toBe(200);
+    expect((await sent(wireRow().id)).status).toBe(200);
+    expect((await sent(wireRow().id, "x".repeat(44))).status).toBe(409);
+    expect((await docs())[0]).toMatchObject({ release_tx: "t".repeat(44), release_ref_height: 1000, outcome: "releasing" });
+  });
+  test("a row that is not releasing, or does not exist, refuses it", async () => {
+    await insert({ outcome: "refused" });
+    expect((await sent(wireRow().id)).status).toBe(409);
+    expect((await sent(idN(9))).status).toBe(404);
+    expect((await s.post("attempt_sent", { id: wireRow().id, release_tx: "t", release_ref_height: -1 })).status).toBe(409);
+  });
+  test("the hash is not in the public row", async () => {
+    await insert({ outcome: "releasing" });
+    await sent(wireRow().id);
+    expect(JSON.stringify(await s.t.query(api.attempts.get, { id: wireRow().id }))).not.toContain("t".repeat(44));
+  });
+  test("payouts returns releasing and signed rows, and drained rows only since the bound; refused rows never", async () => {
+    await insert({ id: idN(1), outcome: "releasing", ts: "2026-11-02T12:00:01.000Z" });
+    await insert({ id: idN(2), outcome: "releasing", ts: "2026-11-02T12:00:02.000Z" });
+    await finish(idN(2), "signed_pending_broadcast");
+    await insert({ id: idN(3), outcome: "releasing", ts: "2026-11-02T12:00:03.000Z" });
+    await finish(idN(3), "drained");
+    await insert({ id: idN(4), outcome: "releasing", ts: "2026-10-01T12:00:00.000Z" });
+    await finish(idN(4), "drained");
+    await insert({ id: idN(5), outcome: "refused", ts: "2026-11-02T12:00:05.000Z" });
+    await sent(idN(1), "h".repeat(44), 77);
+    const r = (await s.post("attempts_payouts", { drained_since: "2026-11-01T00:00:00.000Z" })).json.result;
+    expect(r.map((x: any) => [x.id, x.outcome]).sort()).toEqual([[idN(1), "releasing"], [idN(2), "signed_pending_broadcast"], [idN(3), "drained"]]);
+    expect(r.find((x: any) => x.id === idN(1))).toMatchObject({ release_tx: "h".repeat(44), release_ref_height: 77 });
+    expect(Object.keys(r[0]).sort()).toEqual(["id", "near_tx", "outcome", "release_ref_height", "release_tx", "tier", "ts"]);
+  });
+});

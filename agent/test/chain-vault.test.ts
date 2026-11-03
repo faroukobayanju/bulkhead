@@ -7,7 +7,8 @@ import { privateKeyToAccount, sign as evmSign } from "viem/accounts";
 import { BroadcastFailedError } from "../src/pipeline";
 import { makeBase, NoGasFundsError } from "../src/chain/base";
 import { assembleSigned as assembleBtc, makeBtc, txidOfLegacy } from "../src/chain/btc";
-import { ContractRefusedError, makeVault, ReleaseTimeoutError, RpcError, SignFailedError, type VaultOpts } from "../src/chain/vault";
+import { memoryCounter } from "../src/counter";
+import { ContractRefusedError, makeChainDeps, makeVault, ReleaseTimeoutError, RpcError, SignFailedError, type VaultOpts } from "../src/chain/vault";
 import { PUB, sighash, sign, TEST_DERIVED, TEST_TIER_ADDR, unsignedTx } from "./chain-fixtures";
 
 const VAULT = "vault.bulkhead-test.testnet";
@@ -24,7 +25,7 @@ const BLOCK_HASH = b58(Buffer.alloc(32, 7));
 // ---- a fake NEAR RPC ----
 const rpcErr = (cause: string) => ({ error: { name: "HANDLER_ERROR", cause: { name: cause } } });
 const ev = (event: string, data: unknown) => "EVENT_JSON:" + JSON.stringify({ standard: "bulkhead", version: "1.0.0", event, data });
-const txResult = (logs: string[], over: Record<string, unknown> = {}) => ({ final_execution_status: "FINAL", status: { SuccessValue: "" }, receipts_outcome: [{ outcome: { logs } }], ...over });
+const txResult = (logs: string[], over: Record<string, unknown> = {}) => ({ final_execution_status: "FINAL", status: { SuccessValue: "" }, receipts_outcome: [{ outcome: { executor_id: VAULT, logs } }], ...over });
 const failure = (msg: string) => txResult([], { status: { Failure: { ActionError: { kind: { FunctionCallError: { ExecutionError: msg } } } } } });
 
 type Tier = Record<string, unknown>;
@@ -119,13 +120,14 @@ function btcStub(o: Partial<{ utxos: any[]; fee: number; broadcast: (hex: string
   };
   return { b: b as unknown as ReturnType<typeof makeBtc>, log };
 }
-function baseNode(o: { balance?: bigint; eth?: bigint; sendErr?: string } = {}) {
+function baseNode(o: { balance?: bigint; eth?: bigint; sendErr?: string; chainId?: string } = {}) {
   const calls: string[] = [];
   const Z = "0x" + "00".repeat(32);
   const f = (async (_u: string, init: RequestInit) => {
     const r = JSON.parse(init.body as string);
     calls.push(r.method);
     const res: Record<string, () => unknown> = {
+      eth_chainId: () => o.chainId ?? "0x14a34",
       eth_call: () => "0x" + (o.balance ?? 50_000_000n).toString(16).padStart(64, "0"),
       eth_getTransactionCount: () => "0x7",
       eth_getBalance: () => "0x" + (o.eth ?? 10n ** 16n).toString(16),
@@ -139,7 +141,7 @@ function baseNode(o: { balance?: bigint; eth?: bigint; sendErr?: string } = {}) 
       return new Response(JSON.stringify({ jsonrpc: "2.0", id: r.id, error: { code: -32000, message: (e as Error).message } }));
     }
   }) as unknown as typeof fetch;
-  return { base: makeBase({ fetch: f, rpcUrl: "https://base.test" }), calls };
+  return { base: makeBase({ fetch: f, rpcUrl: "https://base.test" }), calls, f };
 }
 
 function rig(nearOpts: Partial<Near> = {}, vo: Partial<VaultOpts> = {}, btcOpts: Parameters<typeof btcStub>[0] = {}, baseOpts: Parameters<typeof baseNode>[0] = {}) {
@@ -214,7 +216,7 @@ describe("release, Bitcoin", () => {
     const r = rig({ tx: () => txResult(btcSigned(ATTEMPT, { sighash: "00".repeat(31) + "01" })) });
     const res = (await settle(r.vault.release(1, ATTEMPT, RECIPIENT))) as { e: BroadcastFailedError };
     expect(res.e).toBeInstanceOf(BroadcastFailedError);
-    expect(res.e.nearTx).toHaveLength(44);
+    expect(res.e.nearTx).toMatch(/^[1-9A-HJ-NP-Za-km-z]{43,44}$/); // base58 of a sha256: 43 or 44 characters
     expect(r.btc.log).toHaveLength(0);
     expect(r.stored).toHaveLength(0);
   });
@@ -500,5 +502,247 @@ describe("logAttemptRoots", () => {
     await r.vault.logAttemptRoots(1, []);
     await r.vault.logAttemptRoots(2, []); // the chain still says 41: the next nonce must not repeat
     expect(r.sentTxs.map(t => call(t).nonce)).toEqual([42, 43]);
+  });
+});
+
+// ---- fix round 1: recovery state ----
+const HASHED = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/;
+
+describe("the release tx is persisted before it is sent (E6)", () => {
+  test("markSent gets the hash and reference height, and runs before broadcast_tx_async", async () => {
+    const order: string[] = [];
+    let marked: { id: string; tx: string; refHeight: number } | undefined;
+    const r = rig({ tx: () => txResult(btcSigned()) }, { markSent: async (id, x) => { order.push("mark:" + r.count("broadcast_tx_async")); marked = { id, ...x }; } });
+    const out = await r.vault.release(1, ATTEMPT, RECIPIENT);
+    expect(order).toEqual(["mark:0"]); // nothing had been sent yet
+    expect(marked).toEqual({ id: ATTEMPT, tx: out.nearTx, refHeight: 1000 });
+    expect(marked!.tx).toMatch(HASHED);
+  });
+  test("when it cannot be persisted nothing is sent, and wasSigned can say false", async () => {
+    const r = rig({}, { markSent: async () => { throw new Error("convex down"); } });
+    await expect(r.vault.release(1, ATTEMPT, RECIPIENT)).rejects.toThrow("convex down");
+    expect(r.sentTxs).toHaveLength(0);
+    expect(await r.vault.wasSigned(1, ATTEMPT)).toBe(false);
+  });
+});
+
+describe("only the vault's own bulkhead 1.0.0 events count (item 8)", () => {
+  const wrap = (logs: string[], executor: string) => ({ final_execution_status: "FINAL", status: { SuccessValue: "" }, receipts_outcome: [{ outcome: { executor_id: executor, logs } }] });
+  test("the same words from another contract are ignored", async () => {
+    const r = rig({ tx: () => wrap(btcSigned(), "evil.testnet") });
+    expect(((await settle(r.vault.release(1, ATTEMPT, RECIPIENT))) as { e: Error }).e).toBeInstanceOf(SignFailedError);
+  });
+  test("another version, another standard, or no executor is ignored", async () => {
+    const v2 = btcSigned().map(l => l.replace('"version":"1.0.0"', '"version":"2.0.0"'));
+    const nep = btcSigned().map(l => l.replace('"standard":"bulkhead"', '"standard":"other"'));
+    for (const logs of [v2, nep]) {
+      const r = rig({ tx: () => wrap(logs, VAULT) });
+      expect(((await settle(r.vault.release(1, ATTEMPT, RECIPIENT))) as { e: Error }).e).toBeInstanceOf(SignFailedError);
+    }
+    const none = rig({ tx: () => ({ ...wrap(btcSigned(), VAULT), receipts_outcome: [{ outcome: { logs: btcSigned() } }] }) });
+    expect(((await settle(none.vault.release(1, ATTEMPT, RECIPIENT))) as { e: Error }).e).toBeInstanceOf(SignFailedError);
+  });
+  test("one receipt from the vault among others is enough", async () => {
+    const r = rig({ tx: () => ({ ...wrap([], "x"), receipts_outcome: [{ outcome: { executor_id: MPC, logs: ["noise"] } }, { outcome: { executor_id: VAULT, logs: btcSigned() } }] }) });
+    expect((await r.vault.release(1, ATTEMPT, RECIPIENT)).chainTxid).toBe(BTC_TXID);
+  });
+});
+
+describe("coins and nonces stored signed txs already use (item 5)", () => {
+  const coins = [{ txid: "cc".repeat(32), vout: 0, value_sat: 900_000 }, { txid: "dd".repeat(32), vout: 1, value_sat: 500_000 }];
+  test("a coin a stored signed tx spends is not picked, even when it still looks unspent and is the largest", async () => {
+    const r = rig({ tx: () => txResult(btcSigned()) }, { used: async tier => (expect(tier).toBe(1), { outpoints: new Set(["cc".repeat(32) + ":0"]), maxNonce: -1 }) }, { utxos: coins });
+    await r.vault.release(1, ATTEMPT, RECIPIENT);
+    expect(call(r.sentTxs[0]!).args.payload.Bitcoin.utxos).toEqual([coins[1]]);
+  });
+  test("every coin used: ERR_NO_UTXOS, nothing sent", async () => {
+    const r = rig({}, { used: async () => ({ outpoints: new Set(coins.map(c => `${c.txid}:${c.vout}`)), maxNonce: -1 }) }, { utxos: coins });
+    expect(((await settle(r.vault.release(1, ATTEMPT, RECIPIENT))) as { e: ContractRefusedError }).e.code).toBe("ERR_NO_UTXOS");
+    expect(r.sentTxs).toHaveLength(0);
+  });
+  test("Base: the nonce is above any stored one (the chain says 7)", async () => {
+    const nonceWith = async (maxNonce: number) => {
+      const r = rig({ tier: baseTier(), tx: () => txResult(EVM_LOGS) }, { used: async () => ({ outpoints: new Set(), maxNonce }) });
+      await r.vault.release(2, ATTEMPT, EVM_RECIPIENT);
+      return call(r.sentTxs[0]!).args.payload.Base.nonce;
+    };
+    expect(await nonceWith(9)).toBe(10);
+    expect(await nonceWith(3)).toBe(7);
+    expect(await nonceWith(-1)).toBe(7);
+  });
+  test("makeChainDeps feeds it from the stored signed txs of this tier's payout rows only", async () => {
+    // tier 1 drained row spent the S1 coin (b7a37d34...:0); a tier 3 row spent something else
+    const SPENT = "b7a37d34906d713f2436c3992495118f06a59f26f6acdcb3c5d3224959048bd1";
+    const nn = near({ tx: () => txResult(btcSigned()) });
+    const f = (async (url: string, init?: RequestInit) => {
+      if (url.startsWith("https://rpc.test")) return nn.f(url, init!);
+      if (url.endsWith("/utxo")) return new Response(JSON.stringify([{ txid: SPENT, vout: 0, value: 341_067, status: { confirmed: true } }, { txid: "ee".repeat(32), vout: 0, value: 100_000, status: { confirmed: true } }]));
+      if (url.endsWith("/fees/recommended")) return new Response(JSON.stringify({ halfHourFee: 2 }));
+      if (url.endsWith("/tx")) return new Response(BTC_TXID);
+      throw new Error("unexpected " + url);
+    }) as unknown as typeof fetch;
+    const marks: any[] = [];
+    const rows = [
+      { id: "A", tier: 1, outcome: "drained", ts: "t", near_tx: null, release_tx: null, release_ref_height: null },
+      { id: "B", tier: 3, outcome: "drained", ts: "t", near_tx: null, release_tx: null, release_ref_height: null },
+    ];
+    const cfg = { network: "testnet", nearRpc: "https://rpc.test", vaultAccount: VAULT, agentAccount: AGENT, agentPrivateKey: kp.toString(), mempoolBase: "https://m.test/api", baseRpc: "", btcHrp: "tb" } as any;
+    const chain = makeChainDeps(cfg, {
+      fetch: f, onSettled: () => {},
+      db: {
+        putSignedTx: async () => true, updateAttempt: async () => {}, listPayouts: async () => rows as any, counter: memoryCounter(),
+        markSent: async (id, x) => void marks.push([id, x.tx]),
+        getSignedTx: async id => ({ chain: "btc", hex: id === "A" ? BTC_SIGNED : "00".repeat(60) }), // B would not even parse as a tx of ours
+      },
+    });
+    await chain.release(1, ATTEMPT, RECIPIENT);
+    expect(call(nn.sentTxs[0]!).args.payload.Bitcoin.utxos).toEqual([{ txid: "ee".repeat(32), vout: 0, value_sat: 100_000 }]);
+    expect(marks).toEqual([[ATTEMPT, expect.stringMatching(HASHED)]]);
+  });
+});
+
+describe("no coin worth sending (item 10)", () => {
+  test("every coin under the fee floor is ERR_DUST_ONLY, not ERR_OVER_CAP", async () => {
+    const r = rig({}, {}, { utxos: [{ txid: "01".repeat(32), vout: 0, value_sat: 700 }, { txid: "02".repeat(32), vout: 0, value_sat: 1_000 }] });
+    expect(((await settle(r.vault.release(1, ATTEMPT, RECIPIENT))) as { e: ContractRefusedError }).e.code).toBe("ERR_DUST_ONLY");
+  });
+  test("dust beside a coin over the cap is still ERR_DUST_ONLY (something fits the cap, but is too small)", async () => {
+    const r = rig({}, {}, { utxos: [{ txid: "01".repeat(32), vout: 0, value_sat: 700 }, { txid: "02".repeat(32), vout: 0, value_sat: 9_000_000 }] });
+    expect(((await settle(r.vault.release(1, ATTEMPT, RECIPIENT))) as { e: ContractRefusedError }).e.code).toBe("ERR_DUST_ONLY");
+  });
+});
+
+describe("BASE_RPC chain (item 11)", () => {
+  test("a different chain than the tier's refuses before the contract is called", async () => {
+    const r = rig({ tier: baseTier() }, {}, {}, { chainId: "0x2105" }); // Base mainnet, tier is Base Sepolia
+    const e = ((await settle(r.vault.release(2, ATTEMPT, EVM_RECIPIENT))) as { e: Error }).e;
+    expect(e.message).toContain("8453");
+    expect(r.sentTxs).toHaveLength(0);
+  });
+  test("no Base RPC configured: a clear error, not a crash", async () => {
+    const r = rig({ tier: baseTier() }, { base: undefined });
+    expect(((await settle(r.vault.release(2, ATTEMPT, EVM_RECIPIENT))) as { e: Error }).e.message).toContain("no Base RPC");
+  });
+  test("check(): a mismatch stops startup; no Base tier or no Base RPC passes", async () => {
+    const mk = (tierReply: unknown, chainId: string, baseRpc = "https://base.test") => {
+      const nn = near({ tier: baseTier() });
+      const bn = baseNode({ chainId });
+      const f = (async (url: string, init?: RequestInit) => {
+        if (url.startsWith("https://base.test")) return bn.f(url, init!);
+        const body = JSON.parse(init!.body as string);
+        if (tierReply === "ERR_BAD_TIER" && body.params?.method_name === "get_tier") return new Response(JSON.stringify({ jsonrpc: "2.0", id: "x", result: { error: "wasm execution failed: Smart contract panicked: ERR_BAD_TIER", logs: [] } }));
+        return nn.f(url, init!);
+      }) as unknown as typeof fetch;
+      const cfg = { network: "testnet", nearRpc: "https://rpc.test", vaultAccount: VAULT, agentAccount: AGENT, agentPrivateKey: kp.toString(), mempoolBase: "https://m.test/api", baseRpc, btcHrp: "tb" } as any;
+      return makeChainDeps(cfg, { fetch: f, onSettled: () => {}, db: { putSignedTx: async () => true, getSignedTx: async () => null, updateAttempt: async () => {}, markSent: async () => {}, listPayouts: async () => [], counter: memoryCounter() } });
+    };
+    await mk(null, "0x14a34").check();
+    await expect(mk(null, "0x2105").check()).rejects.toThrow("chain 8453");
+    await mk("ERR_BAD_TIER", "0x2105").check();
+    await mk(null, "0x2105", "").check();
+  });
+});
+
+describe("wasSigned: what counts as rejected (item 7)", () => {
+  test("INVALID_TRANSACTION and REQUEST_VALIDATION_ERROR are rejected: false", async () => {
+    const a = rig({ broadcastAsync: () => rpcErr("INVALID_TRANSACTION") });
+    await settle(a.vault.release(1, ATTEMPT, RECIPIENT));
+    expect(await a.vault.wasSigned(1, ATTEMPT)).toBe(false);
+    const b = rig({ broadcastAsync: () => ({ error: { name: "REQUEST_VALIDATION_ERROR", cause: { name: "PARSE_ERROR" } } }) });
+    await settle(b.vault.release(1, ATTEMPT, RECIPIENT));
+    expect(await b.vault.wasSigned(1, ATTEMPT)).toBe(false);
+  });
+  test("INTERNAL_ERROR and TIMEOUT_ERROR prove nothing: still unknown, so it throws", async () => {
+    for (const cause of ["INTERNAL_ERROR", "TIMEOUT_ERROR"]) {
+      const r = rig({ broadcastAsync: () => rpcErr(cause) });
+      await settle(r.vault.release(1, ATTEMPT, RECIPIENT));
+      await expect(r.vault.wasSigned(1, ATTEMPT)).rejects.toThrow();
+    }
+  });
+  test("a network error while sending proves nothing either", async () => {
+    const base = near();
+    const f = (async (u: string, init: RequestInit) => {
+      if (JSON.parse(init.body as string).method === "broadcast_tx_async") throw new TypeError("fetch failed");
+      return base.f(u, init);
+    }) as unknown as typeof fetch;
+    const r = rig({}, { fetch: f });
+    await settle(r.vault.release(1, ATTEMPT, RECIPIENT));
+    await expect(r.vault.wasSigned(1, ATTEMPT)).rejects.toThrow();
+  });
+  test("the tx is read before pending_tx: a signature that landed in between is found", async () => {
+    const r = rig();
+    await settle(r.vault.release(1, ATTEMPT, RECIPIENT)); // timed out
+    r.n.tx = () => txResult([], { status: { SuccessValue: Buffer.from('{"big_r":{}}').toString("base64") } });
+    r.n.pending = {}; // pending_tx still reads empty
+    expect(await r.vault.wasSigned(1, ATTEMPT)).toBe(true);
+    const order: string[] = [];
+    const r2 = rig();
+    await settle(r2.vault.release(1, ATTEMPT, RECIPIENT));
+    r2.calls.length = 0;
+    r2.n.tx = () => failure("Exceeded the prepaid gas");
+    await r2.vault.wasSigned(1, ATTEMPT);
+    order.push(...r2.calls.map(c => c.method + ":" + (c.params?.method_name ?? "")));
+    expect(order.indexOf("tx:")).toBeLessThan(order.indexOf("query:get_pending_tx"));
+  });
+  test("a callback that panicked after the signer answered still has its pending_tx: true", async () => {
+    const r = rig();
+    await settle(r.vault.release(1, ATTEMPT, RECIPIENT));
+    r.n.tx = () => failure("Exceeded the prepaid gas");
+    r.n.pending = { [ATTEMPT]: "0200" };
+    expect(await r.vault.wasSigned(1, ATTEMPT)).toBe(true);
+  });
+});
+
+describe("txVerdict", () => {
+  const verdictFor = async (tx: () => unknown, head = 1000) => {
+    const r = rig({ tx, block: () => ({ header: { height: head } }) });
+    return r.vault.txVerdict("H".repeat(44), 1000);
+  };
+  test("signed, failed, null, not final", async () => {
+    expect(await verdictFor(() => txResult([], { status: { SuccessValue: Buffer.from("{}").toString("base64") } }))).toBe("signed");
+    expect(await verdictFor(() => txResult([], { status: { SuccessValue: "" } }))).toBe("signed"); // anything but null may be a signature
+    expect(await verdictFor(() => failure("Smart contract panicked: ERR_COOLDOWN"))).toBe("failed");
+    expect(await verdictFor(() => txResult([], { status: { SuccessValue: Buffer.from("null").toString("base64") } }))).toBe("null");
+    expect(await verdictFor(() => ({ final_execution_status: "INCLUDED", status: "Started" }))).toBe("notfinal");
+  });
+  test("unknown until 86,400 blocks past the reference height, then expired", async () => {
+    expect(await verdictFor(() => rpcErr("UNKNOWN_TRANSACTION"), 1000 + 86_400)).toBe("unknown");
+    expect(await verdictFor(() => rpcErr("UNKNOWN_TRANSACTION"), 1000 + 86_401)).toBe("expired");
+  });
+  test("other RPC trouble throws", async () => {
+    await expect(verdictFor(() => rpcErr("TIMEOUT_ERROR"))).rejects.toThrow();
+    await expect(verdictFor(() => rpcErr("INTERNAL_ERROR"))).rejects.toThrow();
+  });
+});
+
+describe("recoverSigned: the hex read back from the NEAR tx (item 2)", () => {
+  const H = "H".repeat(44);
+  test("Bitcoin: the same signed tx release would have built", async () => {
+    const r = rig({ tx: () => txResult(btcSigned()) });
+    expect(await r.vault.recoverSigned(H, ATTEMPT, 1)).toEqual({ chain: "btc", hex: BTC_SIGNED });
+    expect(r.calls.find(c => c.method === "tx")!.params).toEqual({ tx_hash: H, sender_account_id: AGENT, wait_until: "FINAL" });
+  });
+  test("Base", async () => {
+    const r = rig({ tier: baseTier(), tx: () => txResult(EVM_LOGS) });
+    const got = (await r.vault.recoverSigned(H, ATTEMPT, 2))!;
+    expect(got.chain).toBe("evm");
+    expect(got.hex).toBe(await evmAcct.signTransaction(evmTx));
+  });
+  test("not final, unknown, failed, or no release_signed for this attempt: null", async () => {
+    expect(await rig({ tx: () => ({ final_execution_status: "INCLUDED" }) }).vault.recoverSigned(H, ATTEMPT, 1)).toBeNull();
+    expect(await rig({ tx: () => rpcErr("UNKNOWN_TRANSACTION") }).vault.recoverSigned(H, ATTEMPT, 1)).toBeNull();
+    expect(await rig({ tx: () => failure("Smart contract panicked: ERR_COOLDOWN") }).vault.recoverSigned(H, ATTEMPT, 1)).toBeNull();
+    expect(await rig({ tx: () => txResult(btcSigned("01JB0000000000000000000002")) }).vault.recoverSigned(H, ATTEMPT, 1)).toBeNull();
+  });
+  test("events from another contract are not trusted", async () => {
+    const r = rig({ tx: () => ({ ...txResult([]), receipts_outcome: [{ outcome: { executor_id: "evil.testnet", logs: btcSigned() } }] }) });
+    expect(await r.vault.recoverSigned(H, ATTEMPT, 1)).toBeNull();
+  });
+  test("a signature that does not verify throws, with the same verify step as release", async () => {
+    const r = rig({ tx: () => txResult(btcSigned(ATTEMPT, { sighash: "00".repeat(31) + "01" })) });
+    await expect(r.vault.recoverSigned(H, ATTEMPT, 1)).rejects.toThrow("does not verify");
+  });
+  test("an RPC failure throws", async () => {
+    await expect(rig({ tx: () => rpcErr("INTERNAL_ERROR") }).vault.recoverSigned(H, ATTEMPT, 1)).rejects.toThrow();
   });
 });

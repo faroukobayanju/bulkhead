@@ -12,7 +12,8 @@ export default defineSchema({
     // the public queries: visible rows only, newest first
     .index("by_hidden_ts", ["hidden", "ts"])
     .index("by_hidden_tier_ts", ["hidden", "tier", "ts"])
-    .index("by_hidden_outcome_ts", ["hidden", "outcome", "ts"]),
+    .index("by_hidden_outcome_ts", ["hidden", "outcome", "ts"])
+    .index("by_outcome_ts", ["outcome", "ts"]), // the payout work list: no scans
   replays: defineTable({ attempt_id: v.string(), fw_version: v.string(), verdict, risk: v.number(), ts: v.string() }).index("by_attempt_version", ["attempt_id", "fw_version"]),
   api_keys: defineTable({ key_hash: v.string(), created: v.string(), label: v.optional(v.string()) }).index("by_key_hash", ["key_hash"]),
   signed_txs: defineTable({ attempt_id: v.string(), chain: oneOf(["btc", "evm"]), hex: v.string() }).index("by_attempt", ["attempt_id"]),

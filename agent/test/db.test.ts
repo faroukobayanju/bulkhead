@@ -274,6 +274,15 @@ describe("through the Convex functions", () => {
     expect(await z.t.query(api.attempts.get, { id: idN(1) })).toMatchObject({ outcome: "drained", stage: "done", reply: "You won.", near_tx: "n", chain_txid: "c" });
   });
 
+  test("markSent stores the release tx before the call, and listPayouts returns the work list through the indexed op", async () => {
+    const z = rig();
+    await z.db.insertAttempt(row({ outcome: "releasing", stage: "signing" }));
+    await z.db.markSent(idN(1), { tx: "H".repeat(44), refHeight: 123 });
+    expect(await z.db.listPayouts("2026-11-01T00:00:00.000Z")).toEqual([{ id: idN(1), tier: 3, outcome: "releasing", ts: "2026-11-02T12:34:56.789Z", near_tx: null, release_tx: "H".repeat(44), release_ref_height: 123 }]);
+    await z.db.updateAttempt(idN(1), { outcome: "drained", reply: "ok" });
+    await expect(z.db.markSent(idN(1), { tx: "H".repeat(44), refHeight: 123 })).rejects.toMatchObject({ status: 409 });
+  });
+
   test("a stage for a row that does not exist yet is false, not an error", async () => {
     expect(await rig().db.setStage(idN(5), "thinking")).toBe(false);
   });

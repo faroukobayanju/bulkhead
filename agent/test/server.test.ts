@@ -386,8 +386,24 @@ describe("pipeline through the server", () => {
     expect(s.locks.has(1)).toBe(true);
     s.clock.now += 700_000; // past the account window
     expect((await err(await s.attempt())).code).toBe("tier_closed");
-    s.onSettled(1);
+    s.onSettled(1, "01JB0000000000000000000099"); // another attempt: not the holder, the lock stays
+    expect(s.locks.has(1)).toBe(true);
+    s.onSettled(1, s.lockedBy.get(1)!);
     expect((await s.attempt()).status).toBe(202);
+  });
+  test("onSettled frees a lock only for the attempt that holds it (adopt at startup, and a live attempt's lock is safe)", async () => {
+    const s = setup();
+    s.adopt(1, "OLD");
+    expect(s.locks.has(1)).toBe(true);
+    s.onSettled(1, "OTHER");
+    expect(s.locks.has(1)).toBe(true);
+    s.onSettled(1, "OLD");
+    expect(s.locks.has(1)).toBe(false);
+    expect(s.lockedBy.has(1)).toBe(false);
+    s.onSettled(1, "OLD"); // settling twice is harmless
+    s.adopt(1, "NEWER");
+    s.onSettled(1, "OLD"); // a stale settle cannot free the lock a later attempt holds
+    expect(s.locks.has(1)).toBe(true);
   });
   test("an unexpected failure is 500 internal naming the attempt id, and is logged", async () => {
     const id = ulid();
