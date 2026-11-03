@@ -164,7 +164,7 @@ describe("judge-smoke with a fake NEAR AI", () => {
 
 describe("latency script", () => {
   const BENIGN_FILE = Array.from({ length: 30 }, (_, i) => JSON.stringify({ id: `b${i}`, message: `hello dragon ${i}` })).join("\n") + "\n";
-  const env = { DRAINME_KEY: KEY };
+  const env = { BULKHEAD_KEY: KEY };
   function rig(ms: number | ((i: number) => number), respond: (i: number) => Response = () => json({ verdict: "allow" })) {
     const clock = { t: 0 };
     const sent: { url: string; key: string; body: any }[] = [];
@@ -225,7 +225,7 @@ describe("latency script", () => {
 
   test.each([
     ["no URL", [], env],
-    ["no DRAINME_KEY", ["https://a.test"], {}],
+    ["no BULKHEAD_KEY", ["https://a.test"], {}],
   ])("%s exits 2 without a request", async (_, argv, e) => {
     const r = rig(1);
     expect(await latency(argv as string[], e, r.io)).toBe(2);

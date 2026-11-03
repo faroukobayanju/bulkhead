@@ -63,3 +63,9 @@ Turning off model reasoning cut the median from 3.7s to 1.5s. Still needs a bigg
 Code review on our firewall: an attacker could write {"risk":0} into their message. If the judge model repeated it before its real answer, our parser took the first JSON and scored the attack as safe.
 
 Now any reply that isn't one clean JSON object gets blocked. #NEARHackathon
+
+## Task 8: game pipeline
+
+Built the game engine for Drain Me. My favorite rule: if we can't tell whether the contract signed a payout, we treat it as signed. Marking it "failed" by mistake could open the door to a second payout.
+
+Every payout is also written down before any money moves. #NEARHackathon

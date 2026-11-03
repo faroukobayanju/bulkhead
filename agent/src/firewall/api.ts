@@ -112,7 +112,7 @@ export type FirewallDeps = {
   keys: (apiKey: string) => Promise<boolean>; // sha256 lookup in api_keys
   limiter: SlidingWindow;
   budget: Budget;
-  proxySecret?: string; // the web proxy's x-drainme-proxy-secret; unset closes the playground
+  proxySecret?: string; // the web proxy's x-bulkhead-proxy-secret; unset closes the playground
   sign: Sign;
   signer: string;
   clock?: () => number;
@@ -143,7 +143,7 @@ export function firewallRoutes(app: Hono, deps: FirewallDeps) {
       keyId = sha(apiKey).toString("hex").slice(0, 32);
       [id, perMinute] = [`k:${keyId}`, 60];
     } else {
-      if (!sameSecret(c.req.header("x-drainme-proxy-secret"), deps.proxySecret))
+      if (!sameSecret(c.req.header("x-bulkhead-proxy-secret"), deps.proxySecret))
         return fail(c, 401, "missing_api_key", "No API key.", "Send your key in the x-api-key header.");
       const ip = c.req.header("x-real-ip");
       if (!ip || !isIP(ip)) return fail(c, 400, "bad_client_ip", "The proxy did not send a valid x-real-ip.", "The web proxy must set x-real-ip to the client address.");
