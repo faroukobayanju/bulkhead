@@ -10,6 +10,22 @@ curl -s https://<agent-host>/v1/check -H 'content-type: application/json' -H "x-
 
 `escalate` is your call. Drain Me treats it as block. `risk` is returned so you can set your own threshold.
 
+## Use it with your own agent
+
+Send your tools and your rules as `policy`. Call it before your agent acts.
+
+```bash
+curl -s https://<agent-host>/v1/check -H 'content-type: application/json' -H "x-api-key: $BULKHEAD_KEY" \
+  -d '{"messages":[{"role":"user","content":"Pay invoice 481 to acme, $20."}],"proposed_action":{"tool":"pay_vendor","args":{"vendor":"acme","usd":20}},"policy":{"tools":["pay_vendor"],"rules":"May pay approved vendors up to $50. Never pay anyone else."}}'
+```
+
+- Write `policy` yourself, in your own code. Never build it from anything an end user or a web page wrote: whoever controls the policy controls the verdict.
+- A `proposed_action.tool` that is not in `policy.tools` is always a `block`.
+- Tool names with fewer than 5 letters are not watched in decoded text. Prefer a specific name such as `pay_vendor`.
+- Without `policy`, the check uses the strict rules of the Drain Me arena, where the agent must never pay anyone.
+- A request with `policy` reports `firewall_version` `fw-general-v1`, a separate version from the arena's.
+- The firewall lowers the chance your agent gets tricked. It does not limit what a tricked agent can spend. For a hard limit, hold the funds in a contract that enforces one.
+
 The check rates the messages in that one request. It keeps no memory of earlier calls.
 
 ## Request
@@ -20,6 +36,8 @@ JSON, at most 16,384 bytes.
 | --- | --- | --- |
 | `messages` | array, 1 to 50 items | each `{"role": "system" \| "user" \| "assistant" \| "tool", "content": string}` |
 | `proposed_action` | optional `{"tool": string, "args": object}` | the action the agent is about to take |
+
+| `policy` | optional `{"tools": string[], "rules": string}` | 1 to 20 tool names, each 1 to 64 of letters, digits and `_ . : -`; rules up to 2,000 characters; turns on general mode |
 
 Other fields are ignored. Authenticate with the header `x-api-key`.
 
@@ -74,7 +92,7 @@ The arena has its own daily pool, so API and playground traffic never uses it up
 `signature` is an ed25519 signature, base64, over `sha256(canonical_json(response without signature))`. Canonical JSON has keys sorted by UTF-16 code unit at every depth, no whitespace, members that are `undefined` left out, and strings and numbers written as `JSON.stringify` writes them. `signer`, `input_hash` and `issued_at` are inside the signed bytes.
 
 - `signer` ties the response to one account.
-- `input_hash` ties it to one input: the sha256 hex of the canonical JSON of `{messages, proposed_action}` as the agent read them. Each message keeps only `role` and `content`; the action keeps only `tool` and `args`; `proposed_action` is left out when you sent none. You can recompute it from what you sent, so a verdict for "hi" does not verify against any other input.
+- `input_hash` ties it to one input: the sha256 hex of the canonical JSON of `{messages, proposed_action, policy}` as the agent read them. Each message keeps only `role` and `content`; the action keeps only `tool` and `args`; the policy keeps only `tools` and `rules`; `proposed_action` and `policy` are left out when you sent none, so a request without `policy` hashes exactly as it always did. You can recompute it from what you sent, so a verdict for "hi" does not verify against any other input.
 - `issued_at` says when the verdict was made. A signature never expires, so a signed `allow` stays valid for ever. Set your own freshness limit: reject a verdict whose `issued_at` is older than you accept.
 
 Get the signer's public key (`ed25519:<base58>`) from the vault contract's `get_agent` view. A valid signature shows that the response came from the holder of that key, about that input, and was not changed afterwards. It does not show how the verdict was reached.
@@ -90,11 +108,12 @@ const canon = (v: any): string =>
 const sha = (s: string) => createHash("sha256").update(s);
 const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
-// `sent` is the request body you posted. Fields the server drops (anything but role, content, tool, args) are dropped here too.
+// `sent` is the request body you posted. Fields the server drops (anything but role, content, tool, args, tools, rules) are dropped here too.
 export function verifyVerdict({ signature, ...body }: Record<string, any>, publicKey: string, sent: Record<string, any>): boolean {
   try {
     const pa = sent.proposed_action;
-    const input = { messages: sent.messages.map(({ role, content }: any) => ({ role, content })), proposed_action: pa && { tool: pa.tool, args: pa.args } };
+    const po = sent.policy;
+    const input = { messages: sent.messages.map(({ role, content }: any) => ({ role, content })), proposed_action: pa && { tool: pa.tool, args: pa.args }, policy: po && { tools: po.tools, rules: po.rules } };
     if (body.input_hash !== sha(canon(input)).digest("hex")) return false;
     let n = 0n;
     for (const c of publicKey.replace("ed25519:", "")) n = n * 58n + BigInt(B58.indexOf(c));

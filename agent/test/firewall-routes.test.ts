@@ -6,7 +6,7 @@ import { memoryCounter, utcDay, type Counter } from "../src/counter";
 import { firewallRoutes } from "../src/firewall/api";
 import { makeBudget } from "../src/firewall/budget";
 import { SlidingWindow } from "../src/firewall/window";
-import { canonicalJson, type Judge } from "../src/firewall/verdict";
+import { canonicalJson, inputHash, type Judge } from "../src/firewall/verdict";
 
 const SECRET = "proxy-secret-0123456789";
 const KEY_A = "dm_live_key_A_secret";
@@ -679,5 +679,64 @@ describe("codehash and firewall_version come from the deps, not env", () => {
     const s = setup({ deps: { codehash: "ab".repeat(32), firewallVersion: "fw-v9" } });
     const j: any = await (await s.withKey()).json();
     expect(j).toMatchObject({ codehash: "ab".repeat(32), firewall_version: "fw-v9" });
+  });
+});
+
+describe("policy", () => {
+  const policy = { tools: ["pay_vendor"], rules: "May pay approved vendors up to $50." };
+  const base = { messages: [{ role: "user" as const, content: "Pay acme $20." }] };
+
+  test("a valid policy returns 200 with the configured general version and a hash that covers the policy", async () => {
+    const s = setup({ deps: { generalVersion: "fw-general-v7" } });
+    const res = await s.withKey({ ...base, policy });
+    const body: any = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.firewall_version).toBe("fw-general-v7");
+    expect(body.input_hash).toBe(inputHash({ messages: base.messages, policy }));
+    expect(s.seen[0]!.policy).toEqual(policy);
+  });
+  test("without generalVersion in the deps the default is fw-general-v1", async () => {
+    const body: any = await (await setup().withKey({ ...base, policy })).json();
+    expect(body.firewall_version).toBe("fw-general-v1");
+  });
+  test("unknown policy fields are dropped before hashing", async () => {
+    const body: any = await (await setup().withKey({ ...base, policy: { ...policy, extra: 1 } })).json();
+    expect(body.input_hash).toBe(inputHash({ messages: base.messages, policy }));
+  });
+  for (const [name, bad] of [
+    ["not an object", "x"],
+    ["an array", []],
+    ["no tools", { rules: "r" }],
+    ["empty tools", { tools: [], rules: "r" }],
+    ["21 tools", { tools: Array.from({ length: 21 }, (_, i) => `tool${i}`), rules: "r" }],
+    ["tool name with a regex in it", { tools: ["a.*(b+)+"], rules: "r" }],
+    ["tool name with a quote", { tools: ['a"b'], rules: "r" }],
+    ["64 characters of quotes", { tools: ['"'.repeat(64)], rules: "r" }],
+    ["65 character tool name", { tools: ["a".repeat(65)], rules: "r" }],
+    ["empty tool name", { tools: [""], rules: "r" }],
+    ["non-string tool", { tools: [1], rules: "r" }],
+    ["no rules", { tools: ["pay_vendor"] }],
+    ["empty rules", { tools: ["pay_vendor"], rules: "" }],
+    ["non-string rules", { tools: ["pay_vendor"], rules: 5 }],
+    ["2,001 character rules", { tools: ["pay_vendor"], rules: "r".repeat(2001) }],
+  ] as [string, unknown][]) {
+    test(`${name} is a 400 and charges nothing`, async () => {
+      const s = setup({ limits: { apiKey: 1 } });
+      const res = await s.withKey({ ...base, policy: bad });
+      expect(res.status).toBe(400);
+      expect(await errCode(res)).toBe("bad_request");
+      expect(s.seen.length).toBe(0);
+      expect((await s.withKey()).status).toBe(200); // the single call of the quota is still there
+    });
+  }
+  test("the boundaries are accepted: 20 tools, a 64 character name, 2,000 characters of rules", async () => {
+    const s = setup();
+    const tools = Array.from({ length: 19 }, (_, i) => `tool${i}`).concat(["A.b:c_d-1".padEnd(64, "x")]);
+    expect((await s.withKey({ ...base, policy: { tools, rules: "r".repeat(2000) } })).status).toBe(200);
+  });
+  test("a request with no policy gets the strict version and the old hash", async () => {
+    const body: any = await (await setup().withKey(base)).json();
+    expect(body.firewall_version).toBe("fw-v1");
+    expect(body.input_hash).toBe(inputHash({ messages: base.messages }));
   });
 });

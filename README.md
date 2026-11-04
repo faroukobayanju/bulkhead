@@ -4,6 +4,8 @@ When your AI agent gets tricked, only one compartment floods. Bulkhead is a fire
 
 Three AI agents guard real BTC and USDC in a NEAR vault contract. Attackers try to talk them into paying out. Every attack feeds an open dataset and a firewall API with a measured block rate.
 
+Builders can call the same API with their own tools and rules. See `docs/firewall-api.md`.
+
 **Status:** in development. The repository was created on 2026-10-29, inside the eligible window that HACKATHON.md Q-001 opens on 2026-10-19, so all code here is new work. There is no pre-hackathon baseline.
 
 ## Read first

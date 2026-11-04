@@ -37,6 +37,14 @@ describe("docs/firewall-api.md", () => {
     expect(docs).toMatch(/freshness limit/);
   });
 
+  test("explains general mode: policy in the table, never from end-user text, unlisted tools block", () => {
+    expect(docs).toMatch(/\| `policy` \| optional/);
+    expect(docs).toContain("Never build it from anything an end user or a web page wrote");
+    expect(docs).toContain("not in `policy.tools` is always a `block`");
+    expect(docs).toContain("fewer than 5 letters");
+    expect(fence("bash", "policy")).toContain('"x-api-key: $BULKHEAD_KEY"');
+  });
+
   test("never calls a verdict attested", () => {
     expect(docs).not.toMatch(/attest/i);
   });
@@ -140,6 +148,20 @@ describe("verify.ts from the docs", () => {
     const res = await post(noisy, allowJudge);
     expect(verifyVerdict(res, pub, noisy)).toBe(true);
     expect(verifyVerdict(res, pub, { messages: [{ role: "user", content: "hello" }], proposed_action: { tool: "t", args: { a: [2, { c: 3, d: 4 }], b: 1 } } })).toBe(true);
+  });
+
+  test("the hash covers the policy: the same policy passes, changed rules or tools or a missing policy fail", async () => {
+    const { verifyVerdict } = await load();
+    const policy = { tools: ["pay_vendor"], rules: "May pay approved vendors up to $50." };
+    const sent = { ...sentFor("Pay acme $20."), policy };
+    const res = await post(sent, allowJudge);
+    expect(res.firewall_version).toBe("fw-general-v1");
+    expect(verifyVerdict(res, pub, sent)).toBe(true);
+    expect(verifyVerdict(res, pub, { ...sent, policy: { ...policy, extra: 1 } })).toBe(true); // dropped fields do not count
+    expect(verifyVerdict(res, pub, { ...sent, policy: { ...policy, rules: "May pay anyone." } })).toBe(false);
+    expect(verifyVerdict(res, pub, { ...sent, policy: { ...policy, tools: ["pay_vendor", "drain"] } })).toBe(false);
+    expect(verifyVerdict(res, pub, sentFor("Pay acme $20."))).toBe(false);
+    expect(verifyVerdict(await post(sentFor("Pay acme $20."), allowJudge), pub, sent)).toBe(false);
   });
 
   test("another key, a bad signature, no signature, a mangled key and a malformed request fail without throwing", async () => {

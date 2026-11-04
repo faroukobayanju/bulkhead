@@ -98,19 +98,37 @@ async function readBody(req: Request, max: number): Promise<Uint8Array | null> {
 // the text reads like a message. It is no longer valid JSON; it is only scanned.
 const argsText = (args: Record<string, unknown>) => JSON.stringify(args).replace(/\\(?:u[0-9a-fA-F]{4}|[^u])/g, m => JSON.parse(`"${m}"`));
 
+const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,64}$/;
+function parsePolicy(p: unknown): Policy | string {
+  if (!isObj(p)) return "policy must be {tools: string[], rules: string}";
+  const { tools, rules } = p;
+  if (!Array.isArray(tools) || tools.length < 1 || tools.length > 20) return "policy.tools must be an array of 1 to 20 tool names";
+  if (!tools.every(t => typeof t === "string" && TOOL_NAME.test(t))) return "each tool name must be 1 to 64 letters, digits, or _ . : -";
+  if (typeof rules !== "string" || rules.length < 1 || rules.length > 2000) return "policy.rules must be a string of 1 to 2,000 characters";
+  return { tools: [...tools], rules };
+}
+
 // Returns the cleaned request, or what is wrong with it. Messages and the action are rebuilt from known fields only.
 function parseReq(x: unknown): CheckReq | string {
   if (!isObj(x)) return "the body must be a JSON object";
-  const { messages, proposed_action } = x;
+  const { messages, proposed_action, policy } = x;
   if (!Array.isArray(messages) || messages.length < 1 || messages.length > 50) return "messages must be an array of 1 to 50 items";
   const clean: Msg[] = [];
   for (const m of messages) {
     if (!isObj(m) || !ROLES.includes(m.role as string) || typeof m.content !== "string") return "each message needs a role (system, user, assistant or tool) and a string content";
     clean.push({ role: m.role as Msg["role"], content: m.content });
   }
-  if (proposed_action === undefined) return { messages: clean };
-  if (!isObj(proposed_action) || typeof proposed_action.tool !== "string" || !isObj(proposed_action.args)) return "proposed_action must be {tool: string, args: object}";
-  return { messages: clean, proposed_action: { tool: proposed_action.tool, args: proposed_action.args } };
+  const req: CheckReq = { messages: clean };
+  if (proposed_action !== undefined) {
+    if (!isObj(proposed_action) || typeof proposed_action.tool !== "string" || !isObj(proposed_action.args)) return "proposed_action must be {tool: string, args: object}";
+    req.proposed_action = { tool: proposed_action.tool, args: proposed_action.args };
+  }
+  if (policy !== undefined) {
+    const p = parsePolicy(policy);
+    if (typeof p === "string") return p;
+    req.policy = p;
+  }
+  return req;
 }
 
 export type FirewallDeps = {
