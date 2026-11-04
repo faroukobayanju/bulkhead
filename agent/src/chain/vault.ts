@@ -381,7 +381,7 @@ type ChainDb = {
 };
 const DRAINED_LOOKBACK_MS = 24 * 3600_000; // a drained payout's coin and nonce are excluded for a day, by which time it has confirmed
 
-export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier, attemptId: string) => void; fetch?: typeof fetch; signer?: Signer; clock?: () => number }) {
+export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier, attemptId: string) => void; fetch?: typeof fetch; signer?: Signer; clock?: () => number; warn?: (what: string, id: string, e: unknown) => void }) {
   const f = x.fetch ?? fetch;
   const kp = cfg.agentPrivateKey ? KeyPair.fromString(cfg.agentPrivateKey as never) : null;
   const signer = x.signer ?? (kp ? { publicKey: kp.getPublicKey().toString(), sign: async (m: Uint8Array) => kp.sign(m).signature } : null);
@@ -395,6 +395,7 @@ export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier
     signerAccount: cfg.network === "mainnet" ? "v1.signer" : "v1.signer-prod.testnet",
     storeSignedTx: r => x.db.putSignedTx(r),
     markSent: (id, r) => x.db.markSent(id, r),
+    warn: x.warn,
     // coins and nonces of this tier's stored signed txs that are not yet old enough to have confirmed
     used: async tier => {
       const outpoints = new Set<string>();

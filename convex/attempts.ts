@@ -51,6 +51,7 @@ export const finish = internalMutation({
     await ctx.db.patch(row._id, {
       outcome: a.outcome,
       stage: "done",
+      ...(a.outcome !== "signed_pending_broadcast" && { settled_at: new Date().toISOString() }),
       ...(a.reply !== undefined && { reply: a.reply }),
       ...(a.near_tx !== undefined && { near_tx: a.near_tx }),
       ...(a.chain_txid !== undefined && { chain_txid: a.chain_txid }),
@@ -75,8 +76,8 @@ export const markSent = internalMutation({
   },
 });
 
-// The payout work list (agent only): rows still `releasing` or `signed_pending_broadcast`, plus `drained` rows since `drained_since`
-// (their spent coins and nonces must not be picked again before they confirm). Needed fields only, each outcome bounded.
+// The payout work list (agent only): rows still `releasing` or `signed_pending_broadcast`, `drained` rows settled since `drained_since`
+// and `broadcast_failed_terminal` rows (their spent coins and nonces must not be picked again before they confirm). Needed fields only, each outcome bounded.
 const PAYOUT_TAKE = 200;
 export const payouts = internalQuery({
   args: { drained_since: v.string() },
@@ -84,7 +85,9 @@ export const payouts = internalQuery({
     const rows = [
       ...(await ctx.db.query("attempts").withIndex("by_outcome_ts", q => q.eq("outcome", "releasing")).order("desc").take(PAYOUT_TAKE)),
       ...(await ctx.db.query("attempts").withIndex("by_outcome_ts", q => q.eq("outcome", "signed_pending_broadcast")).order("desc").take(PAYOUT_TAKE)),
-      ...(await ctx.db.query("attempts").withIndex("by_outcome_ts", q => q.eq("outcome", "drained").gte("ts", a.drained_since)).order("desc").take(PAYOUT_TAKE)),
+      ...(await ctx.db.query("attempts").withIndex("by_outcome_settled", q => q.eq("outcome", "drained").gte("settled_at", a.drained_since)).order("desc").take(PAYOUT_TAKE)),
+      // signed and then given up on: the signed tx may still land, so its coin and nonce stay excluded
+      ...(await ctx.db.query("attempts").withIndex("by_outcome_ts", q => q.eq("outcome", "broadcast_failed_terminal")).order("desc").take(PAYOUT_TAKE)),
     ];
     return rows.map(r => ({ id: r.id, tier: r.tier, outcome: r.outcome, ts: r.ts, near_tx: r.near_tx, release_tx: r.release_tx ?? null, release_ref_height: r.release_ref_height ?? null }));
   },

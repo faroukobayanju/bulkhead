@@ -68,7 +68,7 @@ export async function start(env: Record<string, string | undefined> = process.en
   if (cfg.mock && !cfg.vaultAccount) {
     chain = (await import("./mock")).mockChain(viewAccessKey);
   } else {
-    const real = makeChainDeps(cfg, { db: db as never, onSettled: (t, id) => settled(t, id), fetch: f });
+    const real = makeChainDeps(cfg, { db: db as never, onSettled: (t, id) => settled(t, id), fetch: f, warn: (what, id, e) => log(what, { id, error: (e as Error)?.name ?? "unknown" }) });
     chain = { ...real, viewAccessKey };
     startRebroadcast = real.startRebroadcast;
     pendingPayouts = real.pendingPayouts;

@@ -22,7 +22,9 @@ export const PAYOUT_OUTCOMES = ["releasing", "drained", "signed_pending_broadcas
 // signed payout. Nothing leaves `drained`, `release_failed` or `broadcast_failed_terminal`.
 export const TRANSITIONS: Readonly<Record<string, readonly Outcome[]>> = {
   releasing: ["drained", "signed_pending_broadcast", "release_failed"],
-  signed_pending_broadcast: ["drained", "broadcast_failed_terminal"],
+  // release_failed from a signed row: the payout was never signed after all (the signer failed after the request showed pending_tx);
+  // the agent only asks for it when the release tx is final-failed, null or expired and the contract has no pending_tx
+  signed_pending_broadcast: ["drained", "broadcast_failed_terminal", "release_failed"],
 };
 
 // In the order an attempt passes through them. A stage only moves forward.

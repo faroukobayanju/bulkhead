@@ -163,21 +163,20 @@ export function makeBtc(o: { fetch: typeof fetch; base: string; timeoutMs?: numb
       // text/plain: the default form encoding gets "TX decode failed" (spike S1)
       const res = await o.fetch(`${o.base}/tx`, { method: "POST", headers: { "content-type": "text/plain" }, body: hex, signal: t() });
       const body = (await res.text()).trim();
-      if (res.ok) return body;
-      if (/already (in|known)|txn-already/i.test(body)) return txidOfSigned(hex);
-      // the coin is gone: if this very tx confirmed (a retry after a lost answer, or the first send landed), it is sent
-      if (/missingorspent/i.test(body)) {
-        let txid: string | null = null;
-        try {
-          txid = txidOfSigned(hex);
-        } catch {}
-        if (txid) {
-          const st = await o.fetch(`${o.base}/tx/${txid}/status`, { signal: t() }).catch(() => null);
-          const j: any = st?.ok ? await st.json().catch(() => null) : null;
-          if (j?.confirmed === true) return txid;
-        }
+      let txid: string | null = null;
+      try {
+        txid = txidOfSigned(hex);
+      } catch {}
+      // a 200 is only "sent" when the node names the tx we sent; any other body is a failure, checked against the chain below
+      if (res.ok && txid !== null && body === txid) return txid;
+      if (!res.ok && txid !== null && /already (in|known)|txn-already/i.test(body)) return txid;
+      // the coin is gone, or the answer was odd: if this very tx is confirmed (a retry after a lost answer, or the first send landed), it is sent
+      if (txid !== null && (res.ok || /missingorspent/i.test(body))) {
+        const st = await o.fetch(`${o.base}/tx/${txid}/status`, { signal: t() }).catch(() => null);
+        const j: any = st?.ok ? await st.json().catch(() => null) : null;
+        if (j?.confirmed === true) return txid;
       }
-      throw new BroadcastError(res.status, body);
+      throw new BroadcastError(res.ok ? 502 : res.status, res.ok ? "node answered with another txid" : body);
     },
   };
 }

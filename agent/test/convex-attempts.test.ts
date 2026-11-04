@@ -106,7 +106,8 @@ describe("finish", () => {
     expect(r.status).toBe(200);
     const after = (await docs())[0]!;
     expect(after).toMatchObject({ outcome: "drained", reply: "You won.", near_tx: "ntx", chain_txid: "ctx", stage: "done" });
-    const { outcome, reply, near_tx, chain_txid, stage, ...rest } = after;
+    expect(after.settled_at).toMatch(/^\d{4}-\d{2}-\d{2}T/); // when it settled: the exclusion window counts from here
+    const { outcome, reply, near_tx, chain_txid, stage, settled_at, ...rest } = after;
     const { outcome: _o, reply: _r, near_tx: _n, chain_txid: _c, stage: _s, ...restBefore } = before;
     expect(rest).toEqual(restBefore); // leaf, ts, message, hashes and the rest are untouched
   });
@@ -127,7 +128,7 @@ describe("finish", () => {
     ["releasing", "won_race_lost", false],
     ["signed_pending_broadcast", "drained", true],
     ["signed_pending_broadcast", "broadcast_failed_terminal", true],
-    ["signed_pending_broadcast", "release_failed", false],
+    ["signed_pending_broadcast", "release_failed", true],
     ["signed_pending_broadcast", "releasing", false],
     ["drained", "release_failed", false],
     ["drained", "drained", false],
@@ -276,18 +277,26 @@ describe("release tx and the payout work list (E6)", () => {
     await sent(wireRow().id);
     expect(JSON.stringify(await s.t.query(api.attempts.get, { id: wireRow().id }))).not.toContain("t".repeat(44));
   });
-  test("payouts returns releasing and signed rows, and drained rows only since the bound; refused rows never", async () => {
+  test("payouts returns releasing, signed and terminal rows, and drained ones only when settled since the bound; refused rows never", async () => {
     await insert({ id: idN(1), outcome: "releasing", ts: "2026-11-02T12:00:01.000Z" });
     await insert({ id: idN(2), outcome: "releasing", ts: "2026-11-02T12:00:02.000Z" });
     await finish(idN(2), "signed_pending_broadcast");
     await insert({ id: idN(3), outcome: "releasing", ts: "2026-11-02T12:00:03.000Z" });
     await finish(idN(3), "drained");
-    await insert({ id: idN(4), outcome: "releasing", ts: "2026-10-01T12:00:00.000Z" });
+    await insert({ id: idN(4), outcome: "releasing", ts: "2026-10-01T12:00:00.000Z" }); // an old insert time, settled just now
     await finish(idN(4), "drained");
     await insert({ id: idN(5), outcome: "refused", ts: "2026-11-02T12:00:05.000Z" });
+    await insert({ id: idN(6), outcome: "releasing", ts: "2026-11-02T12:00:06.000Z" });
+    await finish(idN(6), "signed_pending_broadcast");
+    await finish(idN(6), "broadcast_failed_terminal");
+    await insert({ id: idN(7), outcome: "releasing", ts: "2026-11-02T12:00:07.000Z" });
+    await finish(idN(7), "release_failed");
     await sent(idN(1), "h".repeat(44), 77);
-    const r = (await s.post("attempts_payouts", { drained_since: "2026-11-01T00:00:00.000Z" })).json.result;
-    expect(r.map((x: any) => [x.id, x.outcome]).sort()).toEqual([[idN(1), "releasing"], [idN(2), "signed_pending_broadcast"], [idN(3), "drained"]]);
+    const ids = async (since: string) => (await s.post("attempts_payouts", { drained_since: since })).json.result.map((x: any) => [x.id, x.outcome]).sort();
+    // the drained window is keyed on when the row settled (now), not on when it was inserted
+    expect(await ids("2026-01-01T00:00:00.000Z")).toEqual([[idN(1), "releasing"], [idN(2), "signed_pending_broadcast"], [idN(3), "drained"], [idN(4), "drained"], [idN(6), "broadcast_failed_terminal"]]);
+    expect(await ids("9999-01-01T00:00:00.000Z")).toEqual([[idN(1), "releasing"], [idN(2), "signed_pending_broadcast"], [idN(6), "broadcast_failed_terminal"]]);
+    const r = (await s.post("attempts_payouts", { drained_since: "9999-01-01T00:00:00.000Z" })).json.result;
     expect(r.find((x: any) => x.id === idN(1))).toMatchObject({ release_tx: "h".repeat(44), release_ref_height: 77 });
     expect(Object.keys(r[0]).sort()).toEqual(["id", "near_tx", "outcome", "release_ref_height", "release_tx", "tier", "ts"]);
   });

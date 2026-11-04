@@ -106,14 +106,31 @@ describe("mempool client", () => {
     expect(await rate({ halfHourFee: 900 })).toBe(200);
     await expect(rate({})).rejects.toThrow();
   });
-  test("broadcast posts the hex as text/plain and returns the txid", async () => {
-    const { f, calls } = fake(() => new Response("ab".repeat(32) + "\n"));
-    expect(await makeBtc({ fetch: f, base: BASE }).broadcast("0200")).toBe("ab".repeat(32));
+  test("broadcast posts the hex as text/plain and returns the txid the node names", async () => {
+    const { hex } = unsignedTx();
+    const sh = bytesToHex(sighash(PUB, 341_067));
+    const signed = assembleSigned(hex, sign(hexToBytes(sh)), bytesToHex(PUB), sh);
+    const { f, calls } = fake(() => new Response(txidOfLegacy(hex) + "\n"));
+    expect(await makeBtc({ fetch: f, base: BASE }).broadcast(signed)).toBe(txidOfLegacy(hex));
     const init = calls[0]!.init!;
     expect(calls[0]!.url).toBe(`${BASE}/tx`);
     expect(init.method).toBe("POST");
     expect((init.headers as Record<string, string>)["content-type"]).toBe("text/plain");
-    expect(init.body).toBe("0200");
+    expect(init.body).toBe(signed);
+  });
+  test("a 200 whose body is another txid (or not a txid) is a failure, unless the tx is confirmed anyway", async () => {
+    const { hex } = unsignedTx();
+    const sh = bytesToHex(sighash(PUB, 341_067));
+    const signed = assembleSigned(hex, sign(hexToBytes(sh)), bytesToHex(PUB), sh);
+    for (const body of ["ab".repeat(32), "<html>captive portal</html>", ""]) {
+      const b = makeBtc({ fetch: fake(u => (u.endsWith("/tx") ? new Response(body) : new Response("nope", { status: 404 }))).f, base: BASE });
+      await expect(b.broadcast(signed)).rejects.toBeInstanceOf(BroadcastError);
+    }
+    const ok = makeBtc({ fetch: fake(u => (u.endsWith("/tx") ? new Response("ab".repeat(32)) : new Response(JSON.stringify({ confirmed: true })))).f, base: BASE });
+    expect(await ok.broadcast(signed)).toBe(txidOfLegacy(hex)); // the chain has exactly this tx, whatever the node said
+  });
+  test("a hex that is not a tx of ours is a failure even on a 200", async () => {
+    await expect(makeBtc({ fetch: fake(() => new Response("ab".repeat(32))).f, base: BASE }).broadcast("0200")).rejects.toBeInstanceOf(BroadcastError);
   });
   test("a refusal throws BroadcastError with the node's reason", async () => {
     const b = makeBtc({ fetch: fake(() => new Response("min relay fee not met", { status: 400 })).f, base: BASE });
