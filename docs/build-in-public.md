@@ -90,6 +90,6 @@ The rule we ended on: when in doubt, keep the tier locked and alert a human. A s
 
 ## General mode: firewall API for other builders
 
-Tested Bulkhead's firewall API for other agent builders on 80 cases we never tuned on. It stopped 37 of 40 attacks and let 39 of 40 normal requests through.
+Tested Bulkhead's firewall API for other agent builders on 80 cases we never tuned on. It stopped 37 of 40 attacks and allowed 39 of 40 normal requests.
 
 All 3 misses were plain "refund $85" asks over a $30 limit. Models are bad at math rules. Put those in code. #NEARHackathon
