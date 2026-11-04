@@ -327,7 +327,7 @@ export function makeServer(d: ServerDeps) {
         inp,
       ));
       const info = { attempt_id: id, tier: key.tier, near_tx: r.txs?.nearTx, chain_txid: r.txs?.chainTxid };
-      if (r.outcome === "drained" || r.outcome === "signed_pending_broadcast") alert(r.outcome, info);
+      if (r.outcome === "drained" || (r.outcome === "signed_pending_broadcast" && !r.deferred)) alert(r.outcome, info);
       if (r.outcome === "release_failed") {
         refund(); // no money moved: the player may try again
         // one alert per error code per 10 minutes: a broken gas wallet would otherwise page on every attempt

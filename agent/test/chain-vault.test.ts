@@ -4,7 +4,9 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils";
 import { transactions, utils } from "near-api-js";
 import { encodeFunctionData, keccak256, parseAbi, serializeTransaction, type Hex } from "viem";
 import { privateKeyToAccount, sign as evmSign } from "viem/accounts";
-import { BroadcastFailedError } from "../src/pipeline";
+import { BroadcastDeferredError, BroadcastFailedError } from "../src/pipeline";
+import { TRANSITIONS } from "../../shared/attempt";
+const legal = (from: string, to: string) => { if (!TRANSITIONS[from]?.includes(to as never)) throw new Error(`bad_transition ${from} to ${to}`); };
 import { makeBase, NoGasFundsError } from "../src/chain/base";
 import { assembleSigned as assembleBtc, makeBtc, txidOfLegacy } from "../src/chain/btc";
 import { memoryCounter } from "../src/counter";
@@ -253,7 +255,8 @@ describe("release, Base", () => {
     const r = rig({ tier: baseTier(), tx: () => txResult(EVM_LOGS) }, {}, {}, { balance: 50_000_000n });
     // a Base tx in the mempool is not a payout yet: release hands it to the rebroadcast loop (receipt) as a signed payout
     const res = (await settle(r.vault.release(2, ATTEMPT, EVM_RECIPIENT))) as { e: BroadcastFailedError };
-    expect(res.e).toBeInstanceOf(BroadcastFailedError);
+    expect(res.e).toBeInstanceOf(BroadcastDeferredError); // a BroadcastFailedError for the pipeline, but expected: nothing is warned about
+    expect(r.warns).toEqual([]);
     expect(r.bn.calls).toContain("eth_sendRawTransaction");
     const p = call(r.sentTxs[0]!).args.payload.Base;
     expect(p.usdc_amount).toBe("30000000"); // min(balance, max_release)
@@ -765,7 +768,7 @@ describe("a payout row whose release never signed (B1)", () => {
     const log = { updates: [] as any[], alerts: [] as any[], settled: [] as any[] };
     const chain = makeChainDeps(cfg, {
       fetch: nn.f, clock: () => NOW, onSettled: (t, id) => void log.settled.push([t, id]),
-      db: { putSignedTx: async () => true, getSignedTx: async () => null, updateAttempt: async (id, p) => void log.updates.push([id, p.outcome]), markSent: async () => {}, listPayouts: async () => rows, counter: memoryCounter() },
+      db: { putSignedTx: async () => true, getSignedTx: async () => null, updateAttempt: async (id, p) => (legal(rows.find((x: any) => x.id === id)!.outcome, p.outcome), void log.updates.push([id, p.outcome])), markSent: async () => {}, listPayouts: async () => rows, counter: memoryCounter() },
     });
     const stop = chain.startRebroadcast({ alert: (k, d) => void log.alerts.push([k, d]), intervalMs: 60_000, firstMs: 1 });
     for (let i = 0; i < 500 && !stop.idle && i < 1; i++) await Bun.sleep(1);
@@ -852,12 +855,36 @@ describe("Base payouts after round 3", () => {
     await chain.release(1, ATTEMPT, RECIPIENT);
     expect(call(nn.sentTxs[0]!).args.payload.Bitcoin.utxos).toEqual([{ txid: "ee".repeat(32), vout: 0, value_sat: 100_000 }]);
   });
+  // item 2: a row with no stored hex still commits its coin and nonce; the unsigned tx stays in the contract's pending_tx
+  test("a terminal Bitcoin row with no stored hex excludes the coin its pending_tx spends (read once, then cached)", async () => {
+    const nn = near({ tx: () => txResult(btcSigned()), pending: { T: BTC_UNSIGNED } });
+    const f = (async (url: string, init?: RequestInit) => {
+      if (url.startsWith("https://rpc.test")) return nn.f(url, init!);
+      if (url.endsWith("/utxo")) return new Response(JSON.stringify([{ txid: "b7a37d34906d713f2436c3992495118f06a59f26f6acdcb3c5d3224959048bd1", vout: 0, value: 341_067, status: { confirmed: true } }, { txid: "ee".repeat(32), vout: 0, value: 100_000, status: { confirmed: true } }]));
+      if (url.endsWith("/fees/recommended")) return new Response(JSON.stringify({ halfHourFee: 2 }));
+      return new Response(BTC_TXID);
+    }) as unknown as typeof fetch;
+    const chain = makeChainDeps({ ...cfg, baseRpc: "" }, { fetch: f, onSettled: () => {}, db: { putSignedTx: async () => true, getSignedTx: async () => null, updateAttempt: async () => {}, markSent: async () => {}, listPayouts: async () => [prow("T", "broadcast_failed_terminal", 1)] as any, counter: memoryCounter() } });
+    await chain.release(1, ATTEMPT, RECIPIENT);
+    await settle(chain.release(1, "01JB0000000000000000000002", RECIPIENT));
+    expect(call(nn.sentTxs[0]!).args.payload.Bitcoin.utxos).toEqual([{ txid: "ee".repeat(32), vout: 0, value_sat: 100_000 }]);
+    expect(nn.calls.filter(c => c.method === "query" && c.params.method_name === "get_pending_tx")).toHaveLength(1);
+  });
+  test("a signed_pending_broadcast Base row with no stored hex holds its nonce through its pending_tx; a terminal one does not", async () => {
+    const unsignedEvm = serializeTransaction({ ...evmTx, nonce: 12 }).slice(2);
+    for (const [outcome, nonce] of [["signed_pending_broadcast", 13], ["broadcast_failed_terminal", 7]] as const) {
+      const nn = near({ tier: baseTier(), tx: () => txResult(EVM_LOGS), pending: { P: unsignedEvm } });
+      const chain = deps([prow("P", outcome)], baseNode({ balance: 50_000_000n }), nn, {});
+      await settle(chain.release(2, ATTEMPT, EVM_RECIPIENT));
+      expect(call(nn.sentTxs[0]!).args.payload.Base.nonce).toBe(nonce);
+    }
+  });
   test("the rebroadcast loop settles a Base row only on a successful receipt", async () => {
     for (const [receipt, outcome] of [["success", "drained"], [null, undefined], ["reverted", "broadcast_failed_terminal"]] as const) {
       const updates: string[] = [];
       const nn = near({ tier: baseTier() });
       const f = (async (url: string, init?: RequestInit) => (url.startsWith("https://base.test") ? baseNode({ receipt }).f(url, init!) : nn.f(url, init!))) as unknown as typeof fetch;
-      const chain = makeChainDeps(cfg, { fetch: f, onSettled: () => {}, db: { putSignedTx: async () => true, getSignedTx: async () => ({ chain: "evm", hex: SIGNED_EVM }), updateAttempt: async (_i, p) => void updates.push(p.outcome), markSent: async () => {}, listPayouts: async () => [prow("P", "signed_pending_broadcast")] as any, counter: memoryCounter() } });
+      const chain = makeChainDeps(cfg, { fetch: f, onSettled: () => {}, db: { putSignedTx: async () => true, getSignedTx: async () => ({ chain: "evm", hex: SIGNED_EVM }), updateAttempt: async (_i, p) => (legal("signed_pending_broadcast", p.outcome), void updates.push(p.outcome)), markSent: async () => {}, listPayouts: async () => [prow("P", "signed_pending_broadcast")] as any, counter: memoryCounter() } });
       const stop = chain.startRebroadcast({ alert: () => {}, intervalMs: 60_000, firstMs: 1 });
       await Bun.sleep(40);
       stop();

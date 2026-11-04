@@ -27,7 +27,7 @@ export type RebroadcastDeps = {
   txVerdict: (hash: string, refHeight: number) => Promise<Verdict>;
   broadcast: (chain: "btc" | "evm", hex: string) => Promise<string>; // returns the chain txid; "already known" counts as sent
   // Base only: has the tx (by its signed hex) mined, and with what result. Absent: a broadcast counts as settled (Bitcoin).
-  receipt?: (hex: string) => Promise<"success" | "pending" | "reverted">;
+  receipt?: (hex: string) => Promise<{ status: "success" | "pending" | "reverted"; txid: string }>;
   update: (id: string, patch: AttemptPatch) => Promise<void>;
   failures: Counter; // survives restarts when it is the Convex counter
   alert: (kind: string, details: Record<string, unknown>) => void | Promise<void>;
@@ -70,9 +70,15 @@ export async function rebroadcastOnce(d: RebroadcastDeps) {
     if (hex) d.onSettled(p.tier, p.id);
     r.terminal++;
   };
+  const drained = async (p: Payout, txid: string) => {
+    await d.update(p.id, { outcome: "drained", chain_txid: txid, reply: COPY.paid }); // the "being broadcast" text no longer holds
+    d.onSettled(p.tier, p.id);
+    r.settled++;
+  };
   for (const p of await d.payouts()) {
     try {
       let stx = await d.signedTx(p.id);
+      let stored = true; // the hex is in the store (a recovered one only once the write went through)
       const old = now() - Date.parse(p.ts) >= stale;
       if (p.outcome === "releasing") {
         // a stored hex exists only after release_signed: the contract signed, whatever became of the release tx
@@ -84,8 +90,11 @@ export async function rebroadcastOnce(d: RebroadcastDeps) {
             // pending_tx shows from the moment the contract takes the request, while the signer may still fail. Only a release tx that
             // is FINAL with a signature makes this a signed payout; one that can never sign while pending_tx stays is a counted failure.
             if (v !== "signed") {
-              if (v && DEAD.has(v)) await count(p, `release_tx_${v}`, false);
-              else r.waiting++;
+              if (v && DEAD.has(v)) {
+                // pending_tx proves the contract recorded the request: a payout that may be signed. The store only allows terminal from here.
+                await d.update(p.id, { outcome: "signed_pending_broadcast" });
+                await count(p, `release_tx_${v}`, false);
+              } else r.waiting++;
               continue;
             }
           } else if (!old) continue;
@@ -122,32 +131,32 @@ export async function rebroadcastOnce(d: RebroadcastDeps) {
           else await neverSigned(p, "never_signed");
           continue;
         }
-        await Promise.resolve(d.storeSignedTx(p.id, stx.chain, stx.hex)).catch(e => d.warn?.("store_failed", p.id, e));
-      }
-      let txid: string;
-      try {
-        txid = await d.broadcast(stx.chain, stx.hex);
-      } catch (e) {
-        await count(p, (e as Error)?.name ?? "Error", true);
-        continue;
+        await Promise.resolve(d.storeSignedTx(p.id, stx.chain, stx.hex)).catch(e => ((stored = false), d.warn?.("store_failed", p.id, e)));
       }
       if (stx.chain === "evm" && d.receipt) {
-        // a Base tx in the mempool is not a payout: it may still revert or be dropped
-        const st = await d.receipt(stx.hex);
-        if (st === "pending") {
-          r.waiting++;
+        // a Base tx in the mempool is not a payout (it may revert or be dropped), and a mined one must never be counted as a failed
+        // broadcast: the receipt comes first
+        const rc = await d.receipt(stx.hex);
+        if (rc.status === "success") {
+          await drained(p, rc.txid);
           continue;
         }
-        if (st === "reverted") {
+        if (rc.status === "reverted") {
           await d.update(p.id, { outcome: "broadcast_failed_terminal" });
           await d.alert("broadcast_failed_terminal", { attempt_id: p.id, tier: p.tier, near_tx: p.near_tx ?? p.release_tx ?? null, error: "reverted", fix: "owner action needed: the transfer reverted on Base, the tier stays locked" });
           r.terminal++; // the lock stays: the contract signed and the tier is not safe to reopen unattended
           continue;
         }
       }
-      await d.update(p.id, { outcome: "drained", chain_txid: txid });
-      d.onSettled(p.tier, p.id);
-      r.settled++;
+      let txid: string;
+      try {
+        txid = await d.broadcast(stx.chain, stx.hex);
+      } catch (e) {
+        await count(p, (e as Error)?.name ?? "Error", stored);
+        continue;
+      }
+      if (stx.chain === "evm" && d.receipt) r.waiting++; // sent; settles on a later tick, when the receipt says success
+      else await drained(p, txid);
     } catch (e) {
       d.warn?.("rebroadcast_row_failed", p.id, e); // one bad row must not stop the others; a row that left `releasing` meanwhile is refused by the store
     }
