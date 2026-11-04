@@ -42,6 +42,7 @@ export type RebroadcastDeps = {
 // pending_tx for it AND either no release tx hash was ever written (nothing left the process), or that tx is final and failed, or
 // the node does not know it and it is past its validity. A hash that is still running is never closed.
 const STALE_MS = 15 * 60_000;
+const LIVE_MS = 2 * 60_000; // a releasing row this young belongs to a running pipeline (its release wait ends at 120 s)
 const DEAD = new Set<Verdict>(["failed", "null", "expired"]); // the release tx can never sign anything
 
 export async function rebroadcastOnce(d: RebroadcastDeps) {
@@ -70,10 +71,12 @@ export async function rebroadcastOnce(d: RebroadcastDeps) {
     if (hex) d.onSettled(p.tier, p.id);
     r.terminal++;
   };
-  const drained = async (p: Payout, txid: string) => {
+  const drained = async (p: Payout, txid: string, evm = false) => {
     await d.update(p.id, { outcome: "drained", chain_txid: txid, reply: COPY.paid }); // the "being broadcast" text no longer holds
     d.onSettled(p.tier, p.id);
     r.settled++;
+    // a Bitcoin payout is alerted by the pipeline that made it; a Base one settles here, so this is the operator's only word of it
+    if (evm) await d.alert("drained", { attempt_id: p.id, tier: p.tier, near_tx: p.near_tx ?? null, chain_txid: txid });
   };
   for (const p of await d.payouts()) {
     try {
@@ -81,6 +84,7 @@ export async function rebroadcastOnce(d: RebroadcastDeps) {
       let stored = true; // the hex is in the store (a recovered one only once the write went through)
       const old = now() - Date.parse(p.ts) >= stale;
       if (p.outcome === "releasing") {
+        if (now() - Date.parse(p.ts) < LIVE_MS) continue; // the pipeline that made this row is still running
         // a stored hex exists only after release_signed: the contract signed, whatever became of the release tx
         if (stx) {
           if (!old) continue;
@@ -138,7 +142,7 @@ export async function rebroadcastOnce(d: RebroadcastDeps) {
         // broadcast: the receipt comes first
         const rc = await d.receipt(stx.hex);
         if (rc.status === "success") {
-          await drained(p, rc.txid);
+          await drained(p, rc.txid, true);
           continue;
         }
         if (rc.status === "reverted") {
@@ -155,7 +159,11 @@ export async function rebroadcastOnce(d: RebroadcastDeps) {
         await count(p, (e as Error)?.name ?? "Error", stored);
         continue;
       }
-      if (stx.chain === "evm" && d.receipt) r.waiting++; // sent; settles on a later tick, when the receipt says success
+      if (stx.chain === "evm" && d.receipt) {
+        r.waiting++; // sent; settles on a later tick, when the receipt says success
+        // still unmined long after the broadcast succeeded (fee below the base fee, a node that keeps dropping it): tell the operator once
+        if (old && (await d.failures.add(`stalled:${p.id}`, 1)) === 1) await d.alert("base_tx_stalled", { attempt_id: p.id, tier: p.tier });
+      }
       else await drained(p, txid);
     } catch (e) {
       d.warn?.("rebroadcast_row_failed", p.id, e); // one bad row must not stop the others; a row that left `releasing` meanwhile is refused by the store

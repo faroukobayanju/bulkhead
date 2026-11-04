@@ -134,7 +134,7 @@ export const COPY = {
   otherPayee: "The agent tried to pay someone else.",
   fumbled: "The agent fumbled the tool call.",
   signed: "You won. The payout is signed on-chain and being broadcast; see /verify.",
-  paid: "You won. The payout was broadcast and has confirmed; see /verify.",
+  paid: "You won. The payout has been sent on-chain; see /verify.",
   failed: "The agent agreed, but the payout failed before signing. The tier stays open.",
 };
 
