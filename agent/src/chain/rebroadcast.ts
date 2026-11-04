@@ -5,6 +5,7 @@
 // final NEAR release tx (recover). A `releasing` row is closed as failed only when nothing can still sign for it.
 import type { Counter } from "../counter";
 import type { AttemptPatch } from "../db";
+import { COPY } from "../pipeline";
 
 export type Payout = {
   id: string;
@@ -25,6 +26,8 @@ export type RebroadcastDeps = {
   pendingTx: (id: string) => Promise<string | null>; // the contract's get_pending_tx
   txVerdict: (hash: string, refHeight: number) => Promise<Verdict>;
   broadcast: (chain: "btc" | "evm", hex: string) => Promise<string>; // returns the chain txid; "already known" counts as sent
+  // Base only: has the tx (by its signed hex) mined, and with what result. Absent: a broadcast counts as settled (Bitcoin).
+  receipt?: (hex: string) => Promise<"success" | "pending" | "reverted">;
   update: (id: string, patch: AttemptPatch) => Promise<void>;
   failures: Counter; // survives restarts when it is the Convex counter
   alert: (kind: string, details: Record<string, unknown>) => void | Promise<void>;
@@ -49,73 +52,102 @@ export async function rebroadcastOnce(d: RebroadcastDeps) {
   const verdictOf = (p: Payout) => d.txVerdict(p.release_tx!, p.release_ref_height ?? Number.MAX_SAFE_INTEGER); // no height: never "expired"
   // The attempt never signed: the row closes, the tier reopens (the contract has no pending_tx for it), and the operator is told.
   const neverSigned = async (p: Payout, reason: string) => {
-    await d.update(p.id, { outcome: "release_failed" });
+    await d.update(p.id, { outcome: "release_failed", reply: COPY.failed });
     await d.alert("release_failed", { attempt_id: p.id, tier: p.tier, reason });
     d.onSettled(p.tier, p.id);
     r.reconciled++;
   };
+  // The contract signed (or may have) and this tick got nowhere: a failure, and the tenth is terminal. Alerts carry a code or class,
+  // never a message. With a stored hex the lock goes (the coin stays excluded, btc); without one nothing is known about what the
+  // payout spends, so the lock stays until the owner acts.
+  // ponytail: the kept lock is process-local; after a restart that row no longer holds the tier. Persist it if restarts matter here.
+  const count = async (p: Payout, code: string, hex: boolean) => {
+    r.failed++;
+    const n = await d.failures.add(`rebroadcast:${p.id}`, 1);
+    if (n === null || n < max) return;
+    await d.update(p.id, { outcome: "broadcast_failed_terminal" });
+    await d.alert("broadcast_failed_terminal", { attempt_id: p.id, tier: p.tier, near_tx: p.near_tx ?? p.release_tx ?? null, attempts: n, error: code, fix: hex ? "owner emergency withdraw" : "owner action needed: no signed tx known, the tier stays locked" });
+    if (hex) d.onSettled(p.tier, p.id);
+    r.terminal++;
+  };
   for (const p of await d.payouts()) {
     try {
-      let outcome = p.outcome;
-      if (outcome === "releasing") {
-        if (await d.pendingTx(p.id)) {
-          // pending_tx shows from the moment the contract takes the request, while the signer may still fail. Only a release tx that
-          // is FINAL with a signature makes this a signed payout.
-          if (!p.release_tx || (await verdictOf(p)) !== "signed") {
+      let stx = await d.signedTx(p.id);
+      const old = now() - Date.parse(p.ts) >= stale;
+      if (p.outcome === "releasing") {
+        // a stored hex exists only after release_signed: the contract signed, whatever became of the release tx
+        if (stx) {
+          if (!old) continue;
+        } else {
+          const v = p.release_tx ? await verdictOf(p) : null; // the tx before pending_tx, as wasSigned does
+          if (await d.pendingTx(p.id)) {
+            // pending_tx shows from the moment the contract takes the request, while the signer may still fail. Only a release tx that
+            // is FINAL with a signature makes this a signed payout; one that can never sign while pending_tx stays is a counted failure.
+            if (v !== "signed") {
+              if (v && DEAD.has(v)) await count(p, `release_tx_${v}`, false);
+              else r.waiting++;
+              continue;
+            }
+          } else if (!old) continue;
+          else if (p.release_tx && !DEAD.has(v!)) {
             r.waiting++;
             continue;
-          }
-          await d.update(p.id, { outcome: "signed_pending_broadcast" }); // the contract signed and the agent lost the answer
-          outcome = "signed_pending_broadcast";
-        } else if (now() - Date.parse(p.ts) >= stale) {
-          if (p.release_tx && !DEAD.has(await verdictOf(p))) {
-            r.waiting++;
+          } else {
+            await neverSigned(p, "stale_releasing");
             continue;
           }
-          await neverSigned(p, "stale_releasing");
-          continue;
-        } else continue;
-      }
-      let txid: string | null = null;
-      let err: unknown;
-      try {
-        let stx = await d.signedTx(p.id);
-        if (!stx && !p.release_tx && !(await d.pendingTx(p.id))) {
-          // wasSigned could not tell, but no release call was ever sent and the contract holds nothing for this attempt
-          await neverSigned(p, "never_sent");
-          continue;
         }
-        if (!stx && p.release_tx) {
-          stx = await d.recover(p);
-          if (!stx) {
-            // not final, never signed, or still running: only a release tx that can never sign, with no pending_tx, closes the row
-            const dead = DEAD.has(await verdictOf(p)) && !(await d.pendingTx(p.id));
-            if (dead) await neverSigned(p, "never_signed");
-            else r.waiting++;
-            continue;
-          }
-          await Promise.resolve(d.storeSignedTx(p.id, stx.chain, stx.hex)).catch(e => d.warn?.("store_failed", p.id, e));
-        }
-        if (!stx) throw new Error("no signed tx stored for this attempt");
-        txid = await d.broadcast(stx.chain, stx.hex);
-      } catch (e) {
-        err = e;
+        await d.update(p.id, { outcome: "signed_pending_broadcast" }); // the contract signed and the agent lost the answer
       }
-      if (txid !== null) {
-        await d.update(p.id, { outcome: "drained", chain_txid: txid });
-        d.onSettled(p.tier, p.id);
-        r.settled++;
+      if (!stx && !p.release_tx) {
+        // wasSigned could not tell, but no release call was ever sent and the contract holds nothing for this attempt
+        if (await d.pendingTx(p.id)) await count(p, "NoSignedTx", false);
+        else await neverSigned(p, "never_sent");
         continue;
       }
-      if (err === undefined) continue; // closed above
-      r.failed++;
-      const n = await d.failures.add(`rebroadcast:${p.id}`, 1);
-      if (n !== null && n >= max) {
-        await d.update(p.id, { outcome: "broadcast_failed_terminal" });
-        await d.alert("broadcast_failed_terminal", { attempt_id: p.id, tier: p.tier, near_tx: p.near_tx ?? p.release_tx ?? null, attempts: n, error: String((err as Error)?.message ?? err).slice(0, 200), fix: "owner emergency withdraw" });
-        d.onSettled(p.tier, p.id); // the lock goes; the coin and nonce stay excluded from later releases (the signed tx may still land)
-        r.terminal++;
+      if (!stx) {
+        try {
+          stx = await d.recover(p);
+        } catch (e) {
+          if ((e as Error)?.name !== "SignatureError") throw e; // RPC trouble is the node's, not the payout's: warned, never counted
+          await count(p, "SignatureError", false);
+          continue;
+        }
+        if (!stx) {
+          // not final, never signed, or still running: only a release tx that can never sign, with no pending_tx, closes the row
+          const v = await verdictOf(p);
+          const pending = await d.pendingTx(p.id);
+          if (!DEAD.has(v)) r.waiting++;
+          else if (pending) await count(p, `release_tx_${v}`, false);
+          else await neverSigned(p, "never_signed");
+          continue;
+        }
+        await Promise.resolve(d.storeSignedTx(p.id, stx.chain, stx.hex)).catch(e => d.warn?.("store_failed", p.id, e));
       }
+      let txid: string;
+      try {
+        txid = await d.broadcast(stx.chain, stx.hex);
+      } catch (e) {
+        await count(p, (e as Error)?.name ?? "Error", true);
+        continue;
+      }
+      if (stx.chain === "evm" && d.receipt) {
+        // a Base tx in the mempool is not a payout: it may still revert or be dropped
+        const st = await d.receipt(stx.hex);
+        if (st === "pending") {
+          r.waiting++;
+          continue;
+        }
+        if (st === "reverted") {
+          await d.update(p.id, { outcome: "broadcast_failed_terminal" });
+          await d.alert("broadcast_failed_terminal", { attempt_id: p.id, tier: p.tier, near_tx: p.near_tx ?? p.release_tx ?? null, error: "reverted", fix: "owner action needed: the transfer reverted on Base, the tier stays locked" });
+          r.terminal++; // the lock stays: the contract signed and the tier is not safe to reopen unattended
+          continue;
+        }
+      }
+      await d.update(p.id, { outcome: "drained", chain_txid: txid });
+      d.onSettled(p.tier, p.id);
+      r.settled++;
     } catch (e) {
       d.warn?.("rebroadcast_row_failed", p.id, e); // one bad row must not stop the others; a row that left `releasing` meanwhile is refused by the store
     }

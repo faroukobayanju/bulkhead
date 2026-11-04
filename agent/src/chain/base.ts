@@ -3,7 +3,7 @@
 // appends [yParity, r, s] to the same RLP list (evm.rs).
 import { hexToBytes } from "@noble/hashes/utils";
 import { secp256k1 } from "@noble/curves/secp256k1";
-import { createPublicClient, http, keccak256, parseAbi, parseTransaction, recoverAddress, serializeTransaction, type Hex } from "viem";
+import { createPublicClient, decodeFunctionData, http, keccak256, parseAbi, parseTransaction, recoverAddress, serializeTransaction, type Hex } from "viem";
 import type { Sig } from "./btc";
 
 // evm.rs limits: the contract refuses anything above these, so the payload is clamped to them
@@ -74,6 +74,16 @@ export function makeBase(o: { fetch: typeof fetch; rpcUrl: string; timeoutMs?: n
       const need = gasLimit * maxFeePerGas;
       if (have < need) throw new NoGasFundsError(have, need);
     },
+    /** Has the tx mined, and did it succeed? Looked up by the hash of its signed hex. Only a receipt with status success is a payout. */
+    async receipt(rawHex: string): Promise<"success" | "pending" | "reverted"> {
+      try {
+        const r = await client.getTransactionReceipt({ hash: keccak256(rawHex as Hex) });
+        return r.status === "success" ? "success" : "reverted";
+      } catch (e) {
+        if ((e as Error)?.name === "TransactionReceiptNotFoundError") return "pending";
+        return scrub(o.rpcUrl)(e);
+      }
+    },
     /** Returns the tx hash. A tx the node already has counts as sent. */
     async broadcast(rawHex: string): Promise<string> {
       const raw = rawHex as Hex;
@@ -94,3 +104,14 @@ export type Base = ReturnType<typeof makeBase>;
 
 /** The nonce of a signed (or unsigned) EIP-1559 tx this agent stored. */
 export const nonceOfTx = (hex: string): number => Number(parseTransaction((hex.startsWith("0x") ? hex : "0x" + hex) as Hex).nonce ?? -1);
+
+const TRANSFER = parseAbi(["function transfer(address,uint256)"]);
+/** The USDC amount a stored signed transfer pays; 0n for anything that is not a `transfer` call. */
+export function amountOfTx(hex: string): bigint {
+  try {
+    const d = decodeFunctionData({ abi: TRANSFER, data: parseTransaction((hex.startsWith("0x") ? hex : "0x" + hex) as Hex).data ?? "0x" });
+    return d.args[1];
+  } catch {
+    return 0n;
+  }
+}

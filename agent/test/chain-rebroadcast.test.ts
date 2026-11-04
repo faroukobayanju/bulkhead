@@ -6,6 +6,8 @@ import { makeChainDeps } from "../src/chain/vault";
 import type { Config } from "../src/config";
 import type { ChainDeps } from "../src/server";
 
+import { COPY } from "../src/pipeline";
+const COPY_FAILED = COPY.failed;
 const NOW = Date.parse("2026-11-03T12:00:00Z");
 const ID = "01JB0000000000000000000001";
 const row = (o: Partial<Payout> = {}): Payout => ({ id: ID, tier: 1, outcome: "signed_pending_broadcast", ts: new Date(NOW - 60_000).toISOString(), near_tx: "nt", ...o });
@@ -59,13 +61,14 @@ describe("rebroadcastOnce", () => {
     expect(await rebroadcastOnce(d)).toMatchObject({ terminal: 1 });
     expect(log.updates).toEqual([[ID, { outcome: "broadcast_failed_terminal" }]]);
     expect(log.alerts[0]![0]).toBe("broadcast_failed_terminal");
-    expect(log.alerts[0]![1]).toMatchObject({ attempt_id: ID, near_tx: "nt", attempts: 10 });
+    expect(log.alerts[0]![1]).toMatchObject({ attempt_id: ID, near_tx: "nt", attempts: 10, error: "Error" }); // the class, never the message
+    expect(JSON.stringify(log.alerts)).not.toContain("rejected");
     expect(log.settled).toEqual([[1, ID]]); // the lock goes at once, as it would after a restart; the coin stays excluded
   });
   test("no stored signed tx and no release tx hash: nothing was ever sent, so release_failed once pending_tx is None (no emergency-withdraw alert)", async () => {
     const { d, log } = rig([row()], { signedTx: async () => null });
     expect(await rebroadcastOnce(d)).toMatchObject({ reconciled: 1, failed: 0, terminal: 0 });
-    expect(log.updates).toEqual([[ID, { outcome: "release_failed" }]]);
+    expect(log.updates).toEqual([[ID, { outcome: "release_failed", reply: COPY_FAILED }]]);
     expect(log.alerts.map(a => a[0])).toEqual(["release_failed"]);
     expect(log.settled).toEqual([[1, ID]]);
   });
@@ -85,7 +88,7 @@ describe("rebroadcastOnce", () => {
     const { d, log } = rig([row({ id: "01JB0000000000000000000002" }), row()], { signedTx: async id => { if (id.endsWith("2")) throw new Error("x"); return { chain: "btc", hex: "aa" }; } });
     const r = await rebroadcastOnce(d);
     expect(r.settled).toBe(1);
-    expect(r.failed).toBe(1);
+    expect(r.failed).toBe(0); // a store read that throws is warned about, not a failed broadcast
     expect(log.updates).toHaveLength(1);
   });
 
@@ -116,15 +119,16 @@ describe("rebroadcastOnce", () => {
       test(`the release tx is ${v} and the contract has no pending_tx: release_failed, alert, lock freed`, async () => {
         const { d, log } = rig([lost], { signedTx: async () => null, recover: async () => null, txVerdict: async () => v });
         expect(await rebroadcastOnce(d)).toMatchObject({ reconciled: 1, failed: 0, waiting: 0 });
-        expect(log.updates).toEqual([[ID, { outcome: "release_failed" }]]);
+        expect(log.updates).toEqual([[ID, { outcome: "release_failed", reply: COPY_FAILED }]]);
         expect(log.alerts.map(a => a[0])).toEqual(["release_failed"]);
         expect(log.settled).toEqual([[1, ID]]);
         expect(log.broadcasts).toEqual([]);
       });
-      test(`the release tx is ${v} but the contract still has a pending_tx: never closed`, async () => {
+      test(`the release tx is ${v} but the contract still has a pending_tx: never closed, counted as a failure each tick (N2a)`, async () => {
         const { d, log } = rig([lost], { signedTx: async () => null, recover: async () => null, txVerdict: async () => v, pendingTx: async () => "0200" });
-        expect(await rebroadcastOnce(d)).toMatchObject({ reconciled: 0, waiting: 1 });
+        expect(await rebroadcastOnce(d)).toMatchObject({ reconciled: 0, failed: 1 });
         expect(log.updates).toEqual([]);
+        expect(log.settled).toEqual([]);
       });
     }
     test("a verdict that cannot be read changes nothing", async () => {
@@ -132,8 +136,20 @@ describe("rebroadcastOnce", () => {
       await rebroadcastOnce(d);
       expect(log.updates).toEqual([]);
     });
+    // N3: a node that cannot be reached is not a failed broadcast, however long it lasts
+    test("RPC trouble in recover or the verdict is warned about and never counted, so it can never go terminal", async () => {
+      const warns: string[] = [];
+      for (const o of [{ recover: async () => { throw new Error("near rpc tx: http 502"); } }, { recover: async () => null, txVerdict: async () => { throw new Error("rpc down"); } }] as Partial<RebroadcastDeps>[]) {
+        const { d, log } = rig([lost], { signedTx: async () => null, warn: w => void warns.push(w), ...o });
+        for (let i = 0; i < 12; i++) await rebroadcastOnce(d);
+        expect(await d.failures.get(`rebroadcast:${ID}`)).toBe(0);
+        expect(log.updates).toEqual([]);
+        expect(log.settled).toEqual([]);
+      }
+      expect(warns.length).toBe(24);
+    });
     test("a signature that does not verify is a counted failure", async () => {
-      const { d } = rig([lost], { signedTx: async () => null, recover: async () => { throw new Error("signature does not verify against the tier key"); } });
+      const { d } = rig([lost], { signedTx: async () => null, recover: async () => { throw Object.assign(new Error("signature does not verify against the tier key"), { name: "SignatureError" }); } });
       expect(await rebroadcastOnce(d)).toMatchObject({ failed: 1 });
     });
     test("a stored hex is used as is, with no recovery", async () => {
@@ -144,12 +160,59 @@ describe("rebroadcastOnce", () => {
     });
   });
 
+  describe("terminal without a stored hex keeps the lock (N3)", () => {
+    test("a signature that never verifies goes terminal, alerts, and does not free the tier", async () => {
+      const { d, log } = rig([row({ release_tx: "H".repeat(44), release_ref_height: 500 })], { signedTx: async () => null, recover: async () => { throw Object.assign(new Error("bad sig"), { name: "SignatureError" }); } });
+      for (let i = 0; i < 10; i++) await rebroadcastOnce(d);
+      expect(log.updates).toEqual([[ID, { outcome: "broadcast_failed_terminal" }]]);
+      expect(log.alerts[0]![1]).toMatchObject({ error: "SignatureError", fix: expect.stringContaining("owner action") });
+      expect(log.settled).toEqual([]);
+    });
+  });
+
+  describe("Base settles on the receipt", () => {
+    const evm = row({ tier: 2 });
+    const mk = (st: "success" | "pending" | "reverted") => rig([evm], { signedTx: async () => ({ chain: "evm", hex: "0x02" }), receipt: async () => st });
+    test("success: drained and freed", async () => {
+      const { d, log } = mk("success");
+      expect(await rebroadcastOnce(d)).toMatchObject({ settled: 1 });
+      expect(log.updates).toEqual([[ID, { outcome: "drained", chain_txid: "txid1" }]]);
+      expect(log.settled).toEqual([[2, ID]]);
+    });
+    test("pending: stays signed_pending_broadcast, lock kept, nothing counted", async () => {
+      const { d, log } = mk("pending");
+      expect(await rebroadcastOnce(d)).toMatchObject({ settled: 0, waiting: 1, failed: 0 });
+      expect(log.updates).toEqual([]);
+      expect(log.settled).toEqual([]);
+    });
+    test("reverted: terminal, alert (class only), lock kept", async () => {
+      const { d, log } = mk("reverted");
+      expect(await rebroadcastOnce(d)).toMatchObject({ terminal: 1 });
+      expect(log.updates).toEqual([[ID, { outcome: "broadcast_failed_terminal" }]]);
+      expect(log.alerts.map(a => a[0])).toEqual(["broadcast_failed_terminal"]);
+      expect(log.alerts[0]![1]).toMatchObject({ error: "reverted" });
+      expect(log.settled).toEqual([]);
+    });
+    test("a receipt that cannot be read is warned about, not counted, not drained", async () => {
+      const warns: string[] = [];
+      const { d, log } = rig([evm], { signedTx: async () => ({ chain: "evm", hex: "0x02" }), receipt: async () => { throw new Error("rpc"); }, warn: w => void warns.push(w) });
+      await rebroadcastOnce(d);
+      expect(warns).toEqual(["rebroadcast_row_failed"]);
+      expect(log.updates).toEqual([]);
+      expect(await d.failures.get(`rebroadcast:${ID}`)).toBe(0);
+    });
+    test("Bitcoin has no receipt step", async () => {
+      const { d } = rig([row()], { receipt: async () => { throw new Error("must not be asked"); } });
+      expect(await rebroadcastOnce(d)).toMatchObject({ settled: 1 });
+    });
+  });
+
   describe("stale releasing rows", () => {
     const old = (o: Partial<Payout> = {}) => row({ outcome: "releasing", ts: new Date(NOW - 16 * 60_000).toISOString(), ...o });
     test("no release tx hash was ever written and no pending_tx: release_failed, alert, that attempt's lock freed", async () => {
-      const { d, log } = rig([old({ tier: 2 })]);
+      const { d, log } = rig([old({ tier: 2 })], { signedTx: async () => null });
       expect(await rebroadcastOnce(d)).toMatchObject({ reconciled: 1 });
-      expect(log.updates).toEqual([[ID, { outcome: "release_failed" }]]);
+      expect(log.updates).toEqual([[ID, { outcome: "release_failed", reply: COPY_FAILED }]]);
       expect(log.alerts[0]![0]).toBe("release_failed");
       expect(log.settled).toEqual([[2, ID]]);
       expect(log.broadcasts).toEqual([]);
@@ -157,39 +220,63 @@ describe("rebroadcastOnce", () => {
     });
     for (const v of ["failed", "null", "expired"] as const) {
       test(`a hash that is ${v}: release_failed`, async () => {
-        const { d, log } = rig([old({ release_tx: "H".repeat(44), release_ref_height: 500 })], { txVerdict: async () => v });
+        const { d, log } = rig([old({ release_tx: "H".repeat(44), release_ref_height: 500 })], { signedTx: async () => null, txVerdict: async () => v });
         expect(await rebroadcastOnce(d)).toMatchObject({ reconciled: 1 });
-        expect(log.updates).toEqual([[ID, { outcome: "release_failed" }]]);
+        expect(log.updates).toEqual([[ID, { outcome: "release_failed", reply: COPY_FAILED }]]);
       });
     }
     for (const v of ["notfinal", "unknown", "signed"] as const) {
       test(`a hash that is ${v}: never reconciled`, async () => {
-        const { d, log } = rig([old({ release_tx: "H".repeat(44), release_ref_height: 500 })], { txVerdict: async () => v });
+        const { d, log } = rig([old({ release_tx: "H".repeat(44), release_ref_height: 500 })], { signedTx: async () => null, txVerdict: async () => v });
         expect(await rebroadcastOnce(d)).toMatchObject({ reconciled: 0, waiting: 1 });
         expect(log.updates).toEqual([]);
         expect(log.settled).toEqual([]);
       });
     }
     test("a hash with no reference height can never count as expired", async () => {
-      const { d, log } = rig([old({ release_tx: "H".repeat(44), release_ref_height: null })], { txVerdict: async () => "unknown" });
+      const { d, log } = rig([old({ release_tx: "H".repeat(44), release_ref_height: null })], { signedTx: async () => null, txVerdict: async () => "unknown" });
       await rebroadcastOnce(d);
       expect(log.updates).toEqual([]);
     });
     test("a pending_tx and a FINAL signed release tx: promoted to signed_pending_broadcast, then rebroadcast", async () => {
-      const { d, log } = rig([old({ release_tx: "H".repeat(44), release_ref_height: 9 })], { pendingTx: async () => "0200", txVerdict: async () => "signed" });
+      const { d, log } = rig([old({ release_tx: "H".repeat(44), release_ref_height: 9 })], { signedTx: async () => null, recover: async () => ({ chain: "btc", hex: "beef" }), pendingTx: async () => "0200", txVerdict: async () => "signed" });
       expect(await rebroadcastOnce(d)).toMatchObject({ settled: 1, reconciled: 0 });
       expect(log.updates.map(u => u[1].outcome)).toEqual(["signed_pending_broadcast", "drained"]);
     });
-    test("a pending_tx alone is not a signature: while the release tx is not final success the row stays releasing (B1 route 2)", async () => {
-      for (const v of ["notfinal", "unknown", "failed", "null", "expired"] as const) {
-        const { d, log } = rig([old({ release_tx: "H".repeat(44), release_ref_height: 9 })], { pendingTx: async () => "0200", txVerdict: async () => v });
-        expect(await rebroadcastOnce(d)).toMatchObject({ settled: 0, reconciled: 0, waiting: 1 });
+    test("a pending_tx alone is not a signature: while the release tx is not final success the row stays releasing, uncounted (B1 route 2)", async () => {
+      for (const v of ["notfinal", "unknown"] as const) {
+        const { d, log } = rig([old({ release_tx: "H".repeat(44), release_ref_height: 9 })], { signedTx: async () => null, pendingTx: async () => "0200", txVerdict: async () => v });
+        expect(await rebroadcastOnce(d)).toMatchObject({ settled: 0, reconciled: 0, waiting: 1, failed: 0 });
         expect(log.updates).toEqual([]);
         expect(log.settled).toEqual([]);
       }
-      const noHash = rig([old({ release_tx: null })], { pendingTx: async () => "0200" });
+      const noHash = rig([old({ release_tx: null })], { signedTx: async () => null, pendingTx: async () => "0200" });
       expect(await rebroadcastOnce(noHash.d)).toMatchObject({ waiting: 1 });
       expect(noHash.log.updates).toEqual([]);
+    });
+    // N2b: a dead release tx with the pending_tx still set (on_signed out of gas, GC'd tx): counted every tick, terminal after 10, lock kept
+    for (const v of ["failed", "null", "expired"] as const) {
+      test(`a pending_tx and a ${v} release tx: a failure each tick; the tenth is terminal, alerted with the class only, lock kept (no hex)`, async () => {
+        const { d, log } = rig([old({ release_tx: "H".repeat(44), release_ref_height: 9 })], { signedTx: async () => null, pendingTx: async () => "0200", txVerdict: async () => v });
+        for (let i = 0; i < 9; i++) expect(await rebroadcastOnce(d)).toMatchObject({ failed: 1, terminal: 0 });
+        expect(log.updates).toEqual([]);
+        expect(await rebroadcastOnce(d)).toMatchObject({ failed: 1, terminal: 1 });
+        expect(log.updates).toEqual([[ID, { outcome: "broadcast_failed_terminal" }]]);
+        expect(JSON.stringify(log.alerts)).not.toContain("0200");
+        expect(log.settled).toEqual([]);
+      });
+    }
+    // N2c: the contract signed (the hex is stored) and the release tx is gone: promoted and broadcast whatever the verdict
+    test("a stored signed hex on a stale releasing row: promoted and broadcast, the verdict is not asked", async () => {
+      const { d, log } = rig([old({ release_tx: "H".repeat(44), release_ref_height: 9 })], { pendingTx: async () => "0200", txVerdict: async () => { throw new Error("must not be asked"); } });
+      expect(await rebroadcastOnce(d)).toMatchObject({ settled: 1, failed: 0 });
+      expect(log.updates.map(u => u[1].outcome)).toEqual(["signed_pending_broadcast", "drained"]);
+    });
+    test("N4: the release tx is read before pending_tx", async () => {
+      const order: string[] = [];
+      const { d } = rig([old({ release_tx: "H".repeat(44), release_ref_height: 9 })], { signedTx: async () => null, txVerdict: async () => (order.push("verdict"), "notfinal"), pendingTx: async () => (order.push("pending"), null) });
+      await rebroadcastOnce(d);
+      expect(order).toEqual(["verdict", "pending"]);
     });
     test("younger than 15 minutes is left alone", async () => {
       const { d, log } = rig([old({ ts: new Date(NOW - 14 * 60_000).toISOString() })]);
@@ -197,10 +284,10 @@ describe("rebroadcastOnce", () => {
       expect(log.updates).toEqual([]);
     });
     test("a pending_tx or verdict check that fails changes nothing", async () => {
-      const a = rig([old()], { pendingTx: async () => { throw new Error("rpc down"); } });
+      const a = rig([old()], { signedTx: async () => null, pendingTx: async () => { throw new Error("rpc down"); } });
       await rebroadcastOnce(a.d);
       expect(a.log.updates).toEqual([]);
-      const b = rig([old({ release_tx: "H".repeat(44), release_ref_height: 5 })], { txVerdict: async () => { throw new Error("rpc down"); } });
+      const b = rig([old({ release_tx: "H".repeat(44), release_ref_height: 5 })], { signedTx: async () => null, txVerdict: async () => { throw new Error("rpc down"); } });
       await rebroadcastOnce(b.d);
       expect(b.log.updates).toEqual([]);
     });

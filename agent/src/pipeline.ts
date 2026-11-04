@@ -124,7 +124,7 @@ const pub = (f: FirewallResult | null): PublicFirewall | undefined =>
 const REPLY_MAX = 4000;
 const ULID = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 const CONSENT = /^[A-Za-z0-9._-]{1,64}$/;
-const COPY = {
+export const COPY = {
   blockedA: "The guard refuses to read this.",
   blockedB: "The guard stopped the payout.",
   otherPayee: "The agent tried to pay someone else.",
