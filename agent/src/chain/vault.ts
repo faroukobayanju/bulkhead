@@ -14,7 +14,7 @@ import type { Hrp } from "../address";
 import type { Base } from "./base";
 import { GAS_LIMIT, assembleSigned as assembleEvm } from "./base";
 import { assembleSigned as assembleBtc, inputsOf, makeBtc, pickUtxo, tierAddress, tierPubkey, type Btc } from "./btc";
-import { makeBase, nonceOfTx } from "./base";
+import { amountOfTx, makeBase, nonceOfTx } from "./base";
 import { startRebroadcast, type Payout } from "./rebroadcast";
 
 const RELEASE_GAS = 300n * 10n ** 12n; // E14b: never max gas, it reserves more than the key's allowance
@@ -84,7 +84,7 @@ export type VaultOpts = {
   // E6: awaited before the release call is sent, so a restart knows which tx may be in flight. If it throws, nothing is sent.
   markSent?: (attemptId: string, r: { tx: string; refHeight: number }) => Promise<unknown>;
   // Coins and the highest nonce that stored signed txs of this tier already use, so a coin or nonce is never picked twice.
-  used?: (tier: number) => Promise<{ outpoints: ReadonlySet<string>; maxNonce: number }>;
+  used?: (tier: number) => Promise<{ outpoints: ReadonlySet<string>; maxNonce: number; pendingAmount?: bigint }>;
   warn?: (what: string, id: string, e: unknown) => void;
   timeoutMs?: number; // per RPC call, 10 s (E22)
   finalWaitMs?: number; // how long release waits for FINAL, 120 s (E6)
@@ -203,8 +203,9 @@ export function makeVault(o: VaultOpts) {
     }
     const [bal, pending, fees] = await Promise.all([base.usdcBalance(t.address, t.evm.usdc), base.nonce(t.address), base.fees()]);
     const nonce = Math.max(pending, used.maxNonce + 1); // never a nonce a stored signed tx already holds
-    const amount = bal < max ? bal : max;
-    if (amount === 0n) throw new ContractRefusedError("ERR_NO_UTXOS");
+    const free = bal - (used.pendingAmount ?? 0n); // signed and not yet mined: the balance still shows it
+    const amount = free < max ? free : max;
+    if (amount <= 0n) throw new ContractRefusedError("ERR_NO_UTXOS");
     await base.checkGas(t.address, GAS_LIMIT, fees.maxFeePerGas); // NoGasFundsError
     return { derived: null, body: { Base: { nonce, max_fee_per_gas: fees.maxFeePerGas.toString(), max_priority_fee_per_gas: fees.maxPriorityFeePerGas.toString(), gas_limit: Number(GAS_LIMIT), usdc_amount: amount.toString() } } };
   }
@@ -257,8 +258,13 @@ export function makeVault(o: VaultOpts) {
       const s = (await signedFrom(r, attemptId, t, p.derived))!;
       // a failed store must not stop the broadcast: the money is owed either way, and the hex is also in the NEAR tx (recoverSigned)
       await o.storeSignedTx({ attempt_id: attemptId, ...s }).catch(e => o.warn?.("store_failed", attemptId, e));
-      const chainTxid = s.chain === "btc" ? await o.btc.broadcast(s.hex) : await o.base!.broadcast(s.hex);
-      return { nearTx: hash, chainTxid };
+      if (s.chain === "evm") {
+        await o.base!.broadcast(s.hex);
+        // a Base tx in the mempool is not a payout: it may revert or be dropped. The row stays signed_pending_broadcast and the
+        // rebroadcast loop settles it once the receipt says success.
+        throw new BroadcastFailedError(hash);
+      }
+      return { nearTx: hash, chainTxid: await o.btc.broadcast(s.hex) };
     } catch (e) {
       o.warn?.("broadcast_failed", attemptId, e);
       throw new BroadcastFailedError(hash);
@@ -276,7 +282,13 @@ export function makeVault(o: VaultOpts) {
       throw e;
     }
     if (r?.final_execution_status !== "FINAL" || r.status?.Failure) return null;
-    return signedFrom(r, attemptId, await getTier(tier), null);
+    const t = await getTier(tier);
+    const derived = t.chain === "Bitcoin" ? await derivedOf(t) : null; // node reads stay outside the try: only a bad signature is a SignatureError
+    try {
+      return await signedFrom(r, attemptId, t, derived);
+    } catch (e) {
+      throw Object.assign(new Error((e as Error).message), { name: "SignatureError" });
+    }
   }
 
   type Verdict = "signed" | "failed" | "null" | "notfinal" | "unknown" | "expired";
@@ -374,7 +386,7 @@ type PayoutRow = { id: string; tier: 1 | 2 | 3; outcome: string; ts: string; nea
 type ChainDb = {
   putSignedTx(r: { attempt_id: string; chain: "btc" | "evm"; hex: string }): Promise<boolean>;
   getSignedTx(id: string): Promise<{ chain: "btc" | "evm"; hex: string } | null>;
-  updateAttempt(id: string, p: { outcome: string; chain_txid?: string }): Promise<void>;
+  updateAttempt(id: string, p: { outcome: string; chain_txid?: string; reply?: string }): Promise<void>;
   markSent(id: string, r: { tx: string; refHeight: number }): Promise<void>;
   listPayouts(drainedSince: string): Promise<PayoutRow[]>;
   counter: Counter;
@@ -400,14 +412,20 @@ export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier
     used: async tier => {
       const outpoints = new Set<string>();
       let maxNonce = -1;
+      let pendingAmount = 0n;
       for (const r of await rows()) {
         if (r.tier !== tier) continue;
         const s = await x.db.getSignedTx(r.id);
         if (!s) continue;
         if (s.chain === "btc") for (const c of inputsOf(s.hex)) outpoints.add(c);
-        else maxNonce = Math.max(maxNonce, nonceOfTx(s.hex));
+        else if (r.outcome !== "broadcast_failed_terminal") {
+          // a terminal Base row may never have reached the mempool: its nonce would be a gap that nothing fills, so only the chain's own count decides
+          maxNonce = Math.max(maxNonce, nonceOfTx(s.hex));
+          if (r.outcome === "signed_pending_broadcast") pendingAmount += amountOfTx(s.hex);
+          // ponytail: the amount of a terminal row that did land is not subtracted; the next transfer may then revert on balance and shows as a reverted receipt
+        }
       }
-      return { outpoints, maxNonce };
+      return { outpoints, maxNonce, pendingAmount };
     },
     clock: x.clock,
   });
@@ -442,6 +460,7 @@ export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier
         onSettled: x.onSettled,
         pendingTx: vault.pendingTx,
         txVerdict: vault.txVerdict,
+        receipt: hex => (base ? base.receipt(hex) : Promise.reject(new Error("no Base RPC configured"))),
         recover: p => vault.recoverSigned(p.release_tx!, p.id, p.tier),
         signedTx: id => x.db.getSignedTx(id),
         storeSignedTx: (id, chain, hex) => x.db.putSignedTx({ attempt_id: id, chain, hex }),

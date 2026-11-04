@@ -120,7 +120,7 @@ function btcStub(o: Partial<{ utxos: any[]; fee: number; broadcast: (hex: string
   };
   return { b: b as unknown as ReturnType<typeof makeBtc>, log };
 }
-function baseNode(o: { balance?: bigint; eth?: bigint; sendErr?: string; chainId?: string } = {}) {
+function baseNode(o: { balance?: bigint; eth?: bigint; sendErr?: string; chainId?: string; receipt?: "success" | "reverted" | null } = {}) {
   const calls: string[] = [];
   const Z = "0x" + "00".repeat(32);
   const f = (async (_u: string, init: RequestInit) => {
@@ -133,6 +133,7 @@ function baseNode(o: { balance?: bigint; eth?: bigint; sendErr?: string; chainId
       eth_getBalance: () => "0x" + (o.eth ?? 10n ** 16n).toString(16),
       eth_getBlockByNumber: () => ({ number: "0x1", baseFeePerGas: "0x3b9aca00", gasLimit: "0x1c9c380", gasUsed: "0x0", timestamp: "0x1", transactions: [], hash: Z, parentHash: Z, nonce: "0x0000000000000000", miner: "0x" + "00".repeat(20), difficulty: "0x0", totalDifficulty: "0x0", extraData: "0x", size: "0x1", stateRoot: Z, receiptsRoot: Z, transactionsRoot: Z, logsBloom: "0x" + "00".repeat(256), sha3Uncles: Z, uncles: [], mixHash: Z }),
       eth_maxPriorityFeePerGas: () => "0x5f5e100",
+      eth_getTransactionReceipt: () => (o.receipt ? { transactionHash: "0x" + "ab".repeat(32), blockHash: Z, blockNumber: "0x2", transactionIndex: "0x0", from: "0x" + "00".repeat(20), to: "0x" + "00".repeat(20), cumulativeGasUsed: "0x1", gasUsed: "0x1", effectiveGasPrice: "0x1", contractAddress: null, logs: [], logsBloom: "0x" + "00".repeat(256), status: o.receipt === "success" ? "0x1" : "0x0", type: "0x2" } : null),
       eth_sendRawTransaction: () => { if (o.sendErr) throw new Error(o.sendErr); return "0x" + "ab".repeat(32); },
     };
     try {
@@ -250,14 +251,16 @@ describe("release, Bitcoin", () => {
 describe("release, Base", () => {
   test("payload from the chain: full balance up to the cap, fees under the contract's, gas limit under 120k", async () => {
     const r = rig({ tier: baseTier(), tx: () => txResult(EVM_LOGS) }, {}, {}, { balance: 50_000_000n });
-    const out = await r.vault.release(2, ATTEMPT, EVM_RECIPIENT);
+    // a Base tx in the mempool is not a payout yet: release hands it to the rebroadcast loop (receipt) as a signed payout
+    const res = (await settle(r.vault.release(2, ATTEMPT, EVM_RECIPIENT))) as { e: BroadcastFailedError };
+    expect(res.e).toBeInstanceOf(BroadcastFailedError);
+    expect(r.bn.calls).toContain("eth_sendRawTransaction");
     const p = call(r.sentTxs[0]!).args.payload.Base;
     expect(p.usdc_amount).toBe("30000000"); // min(balance, max_release)
     expect(p.nonce).toBe(7);
     expect(BigInt(p.max_fee_per_gas)).toBeLessThanOrEqual(50_000_000_000n);
     expect(p.gas_limit).toBeLessThanOrEqual(120_000);
     expect(call(r.sentTxs[0]!).gas).toBe(300_000_000_000_000n);
-    expect(out.chainTxid).toBe("0x" + "ab".repeat(32));
     expect(r.stored[0]!.chain).toBe("evm");
   });
 
@@ -563,7 +566,7 @@ describe("coins and nonces stored signed txs already use (item 5)", () => {
   test("Base: the nonce is above any stored one (the chain says 7)", async () => {
     const nonceWith = async (maxNonce: number) => {
       const r = rig({ tier: baseTier(), tx: () => txResult(EVM_LOGS) }, { used: async () => ({ outpoints: new Set(), maxNonce }) });
-      await r.vault.release(2, ATTEMPT, EVM_RECIPIENT);
+      await settle(r.vault.release(2, ATTEMPT, EVM_RECIPIENT));
       return call(r.sentTxs[0]!).args.payload.Base.nonce;
     };
     expect(await nonceWith(9)).toBe(10);
@@ -741,6 +744,11 @@ describe("recoverSigned: the hex read back from the NEAR tx (item 2)", () => {
   test("a signature that does not verify throws, with the same verify step as release", async () => {
     const r = rig({ tx: () => txResult(btcSigned(ATTEMPT, { sighash: "00".repeat(31) + "01" })) });
     await expect(r.vault.recoverSigned(H, ATTEMPT, 1)).rejects.toThrow("does not verify");
+    await expect(r.vault.recoverSigned(H, ATTEMPT, 1)).rejects.toMatchObject({ name: "SignatureError" }); // the only recover error that counts against a payout
+  });
+  test("an RPC failure is not a SignatureError", async () => {
+    const e = await rig({ tx: () => rpcErr("INTERNAL_ERROR") }).vault.recoverSigned(H, ATTEMPT, 1).catch((x: Error) => x);
+    expect((e as Error).name).not.toBe("SignatureError");
   });
   test("an RPC failure throws", async () => {
     await expect(rig({ tx: () => rpcErr("INTERNAL_ERROR") }).vault.recoverSigned(H, ATTEMPT, 1)).rejects.toThrow();
@@ -799,5 +807,62 @@ describe("a payout row whose release never signed (B1)", () => {
     const chain = makeChainDeps(cfg, { fetch: f, onSettled: () => {}, warn: w => void warns.push(w), db: { putSignedTx: async () => { throw new Error("db down"); }, getSignedTx: async () => null, updateAttempt: async () => {}, markSent: async () => {}, listPayouts: async () => [], counter: memoryCounter() } });
     await expect(chain.release(1, ATTEMPT, RECIPIENT)).rejects.toThrow();
     expect(warns).toEqual(["store_failed", "broadcast_failed"]);
+  });
+});
+
+// N1 + Base receipt + amount: through makeChainDeps with a fake NEAR node and a fake Base RPC
+const SIGNED_EVM = await evmAcct.signTransaction({ ...evmTx, nonce: 12 }); // 30 USDC, nonce 12
+describe("Base payouts after round 3", () => {
+  const prow = (id: string, outcome: string, tier = 2) => ({ id, tier, outcome, ts: "t", near_tx: null, release_tx: null, release_ref_height: null });
+  const cfg = { network: "testnet", nearRpc: "https://rpc.test", vaultAccount: VAULT, agentAccount: AGENT, agentPrivateKey: kp.toString(), mempoolBase: "https://m.test/api", baseRpc: "https://base.test", btcHrp: "tb" } as any;
+  function deps(rows: any[], bn: ReturnType<typeof baseNode>, nn: ReturnType<typeof near>, signed: Record<string, { chain: "btc" | "evm"; hex: string }>) {
+    const f = (async (url: string, init?: RequestInit) => (url.startsWith("https://base.test") ? bn.f(url, init!) : nn.f(url, init!))) as unknown as typeof fetch;
+    return makeChainDeps(cfg, { fetch: f, onSettled: () => {}, db: { putSignedTx: async () => true, getSignedTx: async id => signed[id] ?? null, updateAttempt: async () => {}, markSent: async () => {}, listPayouts: async () => rows, counter: memoryCounter() } });
+  }
+  test("N1: a terminal Base row that never entered the mempool does not raise the next nonce (the chain says 7)", async () => {
+    const nn = near({ tier: baseTier(), tx: () => txResult(EVM_LOGS) });
+    const chain = deps([prow("T", "broadcast_failed_terminal")], baseNode({ balance: 50_000_000n }), nn, { T: { chain: "evm", hex: SIGNED_EVM } });
+    await settle(chain.release(2, ATTEMPT, EVM_RECIPIENT));
+    expect(call(nn.sentTxs[0]!).args.payload.Base.nonce).toBe(7);
+  });
+  test("a signed_pending_broadcast Base row still holds its nonce, and its amount is taken off the balance", async () => {
+    const nn = near({ tier: baseTier(), tx: () => txResult(EVM_LOGS) });
+    const chain = deps([prow("P", "signed_pending_broadcast")], baseNode({ balance: 50_000_000n }), nn, { P: { chain: "evm", hex: SIGNED_EVM } });
+    await settle(chain.release(2, ATTEMPT, EVM_RECIPIENT));
+    const p = call(nn.sentTxs[0]!).args.payload.Base;
+    expect(p.nonce).toBe(13);
+    expect(p.usdc_amount).toBe("20000000"); // 50 USDC on chain, 30 already signed and unmined
+  });
+  test("everything on chain is already spoken for: ERR_NO_UTXOS, nothing sent", async () => {
+    const nn = near({ tier: baseTier() });
+    const chain = deps([prow("P", "signed_pending_broadcast")], baseNode({ balance: 30_000_000n }), nn, { P: { chain: "evm", hex: SIGNED_EVM } });
+    expect(((await settle(chain.release(2, ATTEMPT, EVM_RECIPIENT))) as { e: ContractRefusedError }).e.code).toBe("ERR_NO_UTXOS");
+    expect(nn.sentTxs).toHaveLength(0);
+  });
+  test("a terminal Bitcoin row still excludes its coin", async () => {
+    const SPENT = "b7a37d34906d713f2436c3992495118f06a59f26f6acdcb3c5d3224959048bd1";
+    const nn = near({ tx: () => txResult(btcSigned()) });
+    const f = (async (url: string, init?: RequestInit) => {
+      if (url.startsWith("https://rpc.test")) return nn.f(url, init!);
+      if (url.endsWith("/utxo")) return new Response(JSON.stringify([{ txid: SPENT, vout: 0, value: 341_067, status: { confirmed: true } }, { txid: "ee".repeat(32), vout: 0, value: 100_000, status: { confirmed: true } }]));
+      if (url.endsWith("/fees/recommended")) return new Response(JSON.stringify({ halfHourFee: 2 }));
+      return new Response(BTC_TXID);
+    }) as unknown as typeof fetch;
+    const chain = makeChainDeps({ ...cfg, baseRpc: "" }, { fetch: f, onSettled: () => {}, db: { putSignedTx: async () => true, getSignedTx: async () => ({ chain: "btc", hex: BTC_SIGNED }), updateAttempt: async () => {}, markSent: async () => {}, listPayouts: async () => [prow("T", "broadcast_failed_terminal", 1)] as any, counter: memoryCounter() } });
+    await chain.release(1, ATTEMPT, RECIPIENT);
+    expect(call(nn.sentTxs[0]!).args.payload.Bitcoin.utxos).toEqual([{ txid: "ee".repeat(32), vout: 0, value_sat: 100_000 }]);
+  });
+  test("the rebroadcast loop settles a Base row only on a successful receipt", async () => {
+    for (const [receipt, outcome] of [["success", "drained"], [null, undefined], ["reverted", "broadcast_failed_terminal"]] as const) {
+      const updates: string[] = [];
+      const nn = near({ tier: baseTier() });
+      const f = (async (url: string, init?: RequestInit) => (url.startsWith("https://base.test") ? baseNode({ receipt }).f(url, init!) : nn.f(url, init!))) as unknown as typeof fetch;
+      const chain = makeChainDeps(cfg, { fetch: f, onSettled: () => {}, db: { putSignedTx: async () => true, getSignedTx: async () => ({ chain: "evm", hex: SIGNED_EVM }), updateAttempt: async (_i, p) => void updates.push(p.outcome), markSent: async () => {}, listPayouts: async () => [prow("P", "signed_pending_broadcast")] as any, counter: memoryCounter() } });
+      const stop = chain.startRebroadcast({ alert: () => {}, intervalMs: 60_000, firstMs: 1 });
+      await Bun.sleep(40);
+      stop();
+      await stop.idle();
+      expect(updates).toEqual(outcome ? [outcome] : []);
+    }
   });
 });
