@@ -62,4 +62,6 @@ export const attemptFields = {
   // before the call is sent, so a restart can tell a payout in flight from one that never left.
   release_tx: v.optional(v.string()),
   release_ref_height: v.optional(v.number()),
+  // When the payout settled (drained, failed or terminal), set by `finish`: the exclusion window of spent coins counts from here.
+  settled_at: v.optional(v.string()),
 };

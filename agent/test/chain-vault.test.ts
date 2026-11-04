@@ -746,3 +746,58 @@ describe("recoverSigned: the hex read back from the NEAR tx (item 2)", () => {
     await expect(rig({ tx: () => rpcErr("INTERNAL_ERROR") }).vault.recoverSigned(H, ATTEMPT, 1)).rejects.toThrow();
   });
 });
+
+// B1/B5: a row whose release never signed must close, end to end through makeChainDeps with a fake node
+describe("a payout row whose release never signed (B1)", () => {
+  const cfg = { network: "testnet", nearRpc: "https://rpc.test", vaultAccount: VAULT, agentAccount: AGENT, agentPrivateKey: kp.toString(), mempoolBase: "https://m.test/api", baseRpc: "", btcHrp: "tb" } as any;
+  const NOW = Date.parse("2026-11-03T12:00:00Z");
+  const row = (o: any) => ({ id: ATTEMPT, tier: 1, outcome: "signed_pending_broadcast", ts: new Date(NOW - 3600_000).toISOString(), near_tx: null, release_tx: "h".repeat(44), release_ref_height: 1000, ...o });
+  async function run(rows: any[], nearOpts: Partial<Near>) {
+    const nn = near(nearOpts);
+    const log = { updates: [] as any[], alerts: [] as any[], settled: [] as any[] };
+    const chain = makeChainDeps(cfg, {
+      fetch: nn.f, clock: () => NOW, onSettled: (t, id) => void log.settled.push([t, id]),
+      db: { putSignedTx: async () => true, getSignedTx: async () => null, updateAttempt: async (id, p) => void log.updates.push([id, p.outcome]), markSent: async () => {}, listPayouts: async () => rows, counter: memoryCounter() },
+    });
+    const stop = chain.startRebroadcast({ alert: (k, d) => void log.alerts.push([k, d]), intervalMs: 60_000, firstMs: 1 });
+    for (let i = 0; i < 500 && !stop.idle && i < 1; i++) await Bun.sleep(1);
+    await Bun.sleep(30);
+    stop();
+    await stop.idle();
+    return log;
+  }
+  test("route 1: the signer failed after the 120 s wait (SuccessValue null, no pending_tx): release_failed, alert, lock freed", async () => {
+    const log = await run([row({})], { tx: () => txResult([ev("release_failed", { attempt_id: ATTEMPT })], { status: { SuccessValue: Buffer.from("null").toString("base64") } }) });
+    expect(log.updates).toEqual([[ATTEMPT, "release_failed"]]);
+    expect(log.alerts.map(a => a[0])).toEqual(["release_failed"]);
+    expect(log.settled).toEqual([[1, ATTEMPT]]);
+  });
+  test("route 1: still pending_tx at the contract, or the tx not final: nothing closes", async () => {
+    const a = await run([row({})], { tx: () => txResult([], { status: { SuccessValue: Buffer.from("null").toString("base64") } }), pending: { [ATTEMPT]: "0200" } });
+    const b = await run([row({})], { tx: () => txResult([], { final_execution_status: "EXECUTED" }) });
+    for (const l of [a, b]) expect(l.updates).toEqual([]);
+  });
+  test("route 2: a releasing row with pending_tx is not promoted while the release tx is not final-signed, and closes nowhere", async () => {
+    const log = await run([row({ outcome: "releasing" })], { tx: () => txResult([], { final_execution_status: "EXECUTED" }), pending: { [ATTEMPT]: "0200" } });
+    expect(log.updates).toEqual([]);
+    expect(log.settled).toEqual([]);
+  });
+  test("route 2: the MPC fails later, pending_tx clears; the row is still releasing and the stale check closes it", async () => {
+    const log = await run([row({ outcome: "releasing" })], { tx: () => txResult([ev("release_failed", { attempt_id: ATTEMPT })], { status: { SuccessValue: Buffer.from("null").toString("base64") } }) });
+    expect(log.updates).toEqual([[ATTEMPT, "release_failed"]]);
+    expect(log.settled).toEqual([[1, ATTEMPT]]);
+  });
+  test("B5: store_failed and broadcast_failed reach the warn hook from makeChainDeps", async () => {
+    const warns: string[] = [];
+    const nn = near({ tx: () => txResult(btcSigned()) });
+    const f = (async (url: string, init?: RequestInit) => {
+      if (url.startsWith("https://rpc.test")) return nn.f(url, init!);
+      if (url.endsWith("/utxo")) return new Response(JSON.stringify([{ txid: "ee".repeat(32), vout: 0, value: 100_000, status: { confirmed: true } }]));
+      if (url.endsWith("/fees/recommended")) return new Response(JSON.stringify({ halfHourFee: 2 }));
+      return new Response("min relay fee not met", { status: 400 });
+    }) as unknown as typeof fetch;
+    const chain = makeChainDeps(cfg, { fetch: f, onSettled: () => {}, warn: w => void warns.push(w), db: { putSignedTx: async () => { throw new Error("db down"); }, getSignedTx: async () => null, updateAttempt: async () => {}, markSent: async () => {}, listPayouts: async () => [], counter: memoryCounter() } });
+    await expect(chain.release(1, ATTEMPT, RECIPIENT)).rejects.toThrow();
+    expect(warns).toEqual(["store_failed", "broadcast_failed"]);
+  });
+});
