@@ -200,6 +200,27 @@ describe("rebroadcastOnce", () => {
       expect(log.updates).toEqual([]);
       expect(log.settled).toEqual([]);
     });
+    test("M1: pending after a successful broadcast for longer than staleMs: one base_tx_stalled alert (code only), lock kept, row untouched", async () => {
+      const { d, log } = mk("pending", { clock: () => NOW + 20 * 60_000 }); // the row is 21 minutes old
+      for (let i = 0; i < 3; i++) await rebroadcastOnce(d);
+      expect(log.alerts.map(a => a[0])).toEqual(["base_tx_stalled"]);
+      expect(log.alerts[0]![1]).toEqual({ attempt_id: ID, tier: 2 });
+      expect(log.updates).toEqual([]);
+      expect(log.settled).toEqual([]);
+    });
+    test("M1: a young pending row does not alert", async () => {
+      const { d, log } = mk("pending");
+      await rebroadcastOnce(d);
+      expect(log.alerts).toEqual([]);
+    });
+    test("M1: settling a Base row to drained tells the operator; a Bitcoin row settled here does not (the pipeline path already alerts)", async () => {
+      const a = mk("success");
+      await rebroadcastOnce(a.d);
+      expect(a.log.alerts).toEqual([["drained", { attempt_id: ID, tier: 2, chain_txid: "0xhash", near_tx: "nt" }]]);
+      const b = rig([row()]);
+      await rebroadcastOnce(b.d);
+      expect(b.log.alerts).toEqual([]);
+    });
     test("pending and the broadcast fails: a counted failure", async () => {
       const { d } = mk("pending", { broadcast: async () => { throw new Error("rejected"); } });
       expect(await rebroadcastOnce(d)).toMatchObject({ failed: 1 });
@@ -240,6 +261,11 @@ describe("rebroadcastOnce", () => {
   });
 
   describe("stale releasing rows", () => {
+    test("L5: a releasing row younger than 2 minutes is the live pipeline's: never promoted, even with a pending_tx and a signed verdict", async () => {
+      const { d, log } = rig([row({ outcome: "releasing", ts: new Date(NOW - 60_000).toISOString(), release_tx: "H".repeat(44), release_ref_height: 9 })], { signedTx: async () => null, pendingTx: async () => "0200", txVerdict: async () => "signed" });
+      await rebroadcastOnce(d);
+      expect(log.updates).toEqual([]);
+    });
     const old = (o: Partial<Payout> = {}) => row({ outcome: "releasing", ts: new Date(NOW - 16 * 60_000).toISOString(), ...o });
     test("no release tx hash was ever written and no pending_tx: release_failed, alert, that attempt's lock freed", async () => {
       const { d, log } = rig([old({ tier: 2 })], { signedTx: async () => null });
@@ -406,11 +432,11 @@ describe("makeChainDeps", () => {
       onSettled: () => {},
     });
     const stop = chain.startRebroadcast({ alert: () => {}, intervalMs: 5_000, firstMs: 1, warn: w => void warns.push(w) });
-    let n = 0;
-    for (let i = 0; i < 1000 && n === 0; i++) (await Bun.sleep(5), (n = await counter.get(`rebroadcast:${ID}`)));
+    for (let i = 0; i < 1000 && warns.length === 0; i++) await Bun.sleep(5);
     stop();
     await stop.idle();
-    expect(n).toBe(1); // counted as a broadcast failure (caught per attempt), not an uncaught crash
-    expect(warns).toEqual([]);
+    const n = await counter.get(`rebroadcast:${ID}`);
+    expect(n).toBe(0); // L3: no Base RPC is configuration, not a failed payout: warned about each tick, never counted toward terminal
+    expect(warns.length).toBeGreaterThan(0);
   });
 });

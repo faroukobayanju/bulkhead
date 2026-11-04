@@ -879,6 +879,26 @@ describe("Base payouts after round 3", () => {
       expect(call(nn.sentTxs[0]!).args.payload.Base.nonce).toBe(nonce);
     }
   });
+  test("L1: a drained row whose hex was never stored still excludes its coin through the pending_tx", async () => {
+    const nn = near({ tx: () => txResult(btcSigned()), pending: { T: BTC_UNSIGNED } });
+    const f = (async (url: string, init?: RequestInit) => {
+      if (url.startsWith("https://rpc.test")) return nn.f(url, init!);
+      if (url.endsWith("/utxo")) return new Response(JSON.stringify([{ txid: "b7a37d34906d713f2436c3992495118f06a59f26f6acdcb3c5d3224959048bd1", vout: 0, value: 341_067, status: { confirmed: true } }, { txid: "ee".repeat(32), vout: 0, value: 100_000, status: { confirmed: true } }]));
+      if (url.endsWith("/fees/recommended")) return new Response(JSON.stringify({ halfHourFee: 2 }));
+      return new Response(BTC_TXID);
+    }) as unknown as typeof fetch;
+    const chain = makeChainDeps({ ...cfg, baseRpc: "" }, { fetch: f, onSettled: () => {}, db: { putSignedTx: async () => true, getSignedTx: async () => null, updateAttempt: async () => {}, markSent: async () => {}, listPayouts: async () => [prow("T", "drained", 1)] as any, counter: memoryCounter() } });
+    await chain.release(1, ATTEMPT, RECIPIENT);
+    expect(call(nn.sentTxs[0]!).args.payload.Bitcoin.utxos).toEqual([{ txid: "ee".repeat(32), vout: 0, value_sat: 100_000 }]);
+  });
+  test("L2: a null pending_tx is not cached: it is asked again, and used once the contract shows it", async () => {
+    const nn = near({ tier: baseTier(), tx: () => txResult(EVM_LOGS), pending: {} });
+    const chain = deps([prow("P", "signed_pending_broadcast")], baseNode({ balance: 50_000_000n }), nn, {});
+    await settle(chain.release(2, ATTEMPT, EVM_RECIPIENT));
+    nn.n.pending.P = serializeTransaction({ ...evmTx, nonce: 12 }).slice(2);
+    await settle(chain.release(2, "01JB0000000000000000000002", EVM_RECIPIENT));
+    expect(call(nn.sentTxs[1]!).args.payload.Base.nonce).toBe(13);
+  });
   test("the rebroadcast loop settles a Base row only on a successful receipt", async () => {
     for (const [receipt, outcome] of [["success", "drained"], [null, undefined], ["reverted", "broadcast_failed_terminal"]] as const) {
       const updates: string[] = [];

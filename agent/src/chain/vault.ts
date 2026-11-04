@@ -399,7 +399,7 @@ export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier
   const clock = x.clock ?? Date.now;
   const btc = makeBtc({ fetch: f, base: cfg.mempoolBase });
   const base = cfg.baseRpc ? makeBase({ fetch: f, rpcUrl: cfg.baseRpc }) : undefined;
-  const unsigned = new Map<string, string | null>(); // attempt id -> the contract's pending_tx, for rows with no stored hex
+  const unsigned = new Map<string, string>(); // attempt id -> the contract's pending_tx, for rows with no stored hex
   const rows = () => x.db.listPayouts(new Date(clock() - DRAINED_LOOKBACK_MS).toISOString());
   const vault = makeVault({
     fetch: f, rpcUrl: cfg.nearRpc, vaultAccount: cfg.vaultAccount, agentAccount: cfg.agentAccount, hrp: cfg.btcHrp, signer, btc, base,
@@ -415,11 +415,14 @@ export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier
       for (const r of await rows()) {
         if (r.tier !== tier) continue;
         let s = await x.db.getSignedTx(r.id);
-        if (!s && (r.outcome === "signed_pending_broadcast" || r.outcome === "broadcast_failed_terminal")) {
+        if (!s && (r.outcome === "signed_pending_broadcast" || r.outcome === "broadcast_failed_terminal" || r.outcome === "drained")) {
           // no stored hex (a terminal row nobody could recover, or one whose signature never verified): the contract still holds the
           // unsigned tx it asked the MPC to sign, which names the same coins and nonce. Immutable once signed, so read once.
-          let u = unsigned.get(r.id);
-          if (u === undefined) unsigned.set(r.id, (u = await vault.pendingTx(r.id)));
+          let u = unsigned.get(r.id) ?? null;
+          if (u === null) {
+            u = await vault.pendingTx(r.id);
+            if (u !== null) unsigned.set(r.id, u); // only a tx that exists is cached: null may just be "not signed yet"
+          }
           if (u) s = { chain: tier === 2 ? "evm" : "btc", hex: u }; // ponytail: the chain of a tier is fixed (1 and 3 Bitcoin, 2 Base); read it from get_tier if that changes
         }
         if (!s) continue;
@@ -466,7 +469,10 @@ export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier
         onSettled: x.onSettled,
         pendingTx: vault.pendingTx,
         txVerdict: vault.txVerdict,
-        receipt: async hex => (base ? base.receipt(hex) : { status: "pending" as const, txid: "" }), // no Base RPC: the broadcast step then fails, counted
+        receipt: async hex => {
+          if (!base) throw Object.assign(new Error("no Base RPC configured"), { name: "NoBaseRpc" }); // configuration, not a failed payout: warned about, never counted
+          return base.receipt(hex);
+        },
         recover: p => vault.recoverSigned(p.release_tx!, p.id, p.tier),
         signedTx: id => x.db.getSignedTx(id),
         storeSignedTx: (id, chain, hex) => x.db.putSignedTx({ attempt_id: id, chain, hex }),
