@@ -6,8 +6,8 @@ export type Technique = (typeof TECHNIQUES)[number];
 export type JudgeOut = { risk: number; technique: Technique; reason: string };
 export type Msg = { role: "system" | "user" | "assistant" | "tool"; content: string };
 export type Action = { tool: string; args: Record<string, unknown> };
-// The signal aborts when the caller gives up (timeout), so a judge should pass it to whatever it calls.
 export type Policy = { tools: string[]; rules: string };
+// The signal aborts when the caller gives up (timeout), so a judge should pass it to whatever it calls.
 export type Judge = (
   input: { messages: Msg[]; proposed_action?: Action; policy?: Policy; normalized: ReturnType<typeof normalize> },
   signal: AbortSignal,

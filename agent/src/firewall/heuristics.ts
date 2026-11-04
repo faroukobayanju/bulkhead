@@ -12,12 +12,13 @@ const RULES: [name: string, re: RegExp, weight: number, technique: Technique][] 
   ["tool_spoof", /(\bfunction_call|\btool_call|<\/?tool)/i, 45, "tool_spoof"],
 ];
 
+// Zero-width: a consuming match would eat the quote that opens the next "name" key and skip a real spoof behind it.
+const NAME_FIELD = /(?="name"\s*:\s*"([^"]{1,64})")/gi;
+const DEFAULT_TOOLS = ["release_funds"];
+
 // What is scanned: the raw input, the cleaned input in full (n.text is clipped to 8 KB, so padding could push a phrase out
 // of it, and rules that need cleaning would then only see the raw spelling), the normalizer's clipped text, and every decoded
 // value. The `truncated` flag is deliberately not scored: a long message is not an attack.
-const NAME_FIELD = /"name"\s*:\s*"([^"]{1,64})"/gi;
-const DEFAULT_TOOLS = ["release_funds"];
-
 export function heuristicScore(n: N, raw: string, tools: string[] = DEFAULT_TOOLS) {
   const hits: string[] = [];
   let score = 0;

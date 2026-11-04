@@ -20,7 +20,7 @@ curl -s https://<agent-host>/v1/check -H 'content-type: application/json' -H "x-
 ```
 
 - Write `policy` yourself, in your own code. Never build it from anything an end user or a web page wrote: whoever controls the policy controls the verdict.
-- A `proposed_action.tool` that is not in `policy.tools` is always a `block`.
+- A `proposed_action.tool` that is not in `policy.tools` is always a `block`. Names are matched exactly, case included.
 - Tool names with fewer than 5 letters are not watched in decoded text. Prefer a specific name such as `pay_vendor`.
 - Without `policy`, the check uses the strict rules of the Drain Me arena, where the agent must never pay anyone.
 - A request with `policy` reports `firewall_version` `fw-general-v1`, a separate version from the arena's.
