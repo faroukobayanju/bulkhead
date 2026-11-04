@@ -9,7 +9,7 @@ import type { Config } from "../config";
 import type { Tier } from "../llm";
 import { bytesToHex } from "@noble/hashes/utils";
 import { KeyPair, transactions, utils } from "near-api-js";
-import { BroadcastFailedError, type TierState } from "../pipeline";
+import { BroadcastDeferredError, BroadcastFailedError, type TierState } from "../pipeline";
 import type { Hrp } from "../address";
 import type { Base } from "./base";
 import { GAS_LIMIT, assembleSigned as assembleEvm } from "./base";
@@ -258,17 +258,15 @@ export function makeVault(o: VaultOpts) {
       const s = (await signedFrom(r, attemptId, t, p.derived))!;
       // a failed store must not stop the broadcast: the money is owed either way, and the hex is also in the NEAR tx (recoverSigned)
       await o.storeSignedTx({ attempt_id: attemptId, ...s }).catch(e => o.warn?.("store_failed", attemptId, e));
-      if (s.chain === "evm") {
-        await o.base!.broadcast(s.hex);
-        // a Base tx in the mempool is not a payout: it may revert or be dropped. The row stays signed_pending_broadcast and the
-        // rebroadcast loop settles it once the receipt says success.
-        throw new BroadcastFailedError(hash);
-      }
-      return { nearTx: hash, chainTxid: await o.btc.broadcast(s.hex) };
+      if (s.chain === "btc") return { nearTx: hash, chainTxid: await o.btc.broadcast(s.hex) };
+      await o.base!.broadcast(s.hex);
     } catch (e) {
       o.warn?.("broadcast_failed", attemptId, e);
       throw new BroadcastFailedError(hash);
     }
+    // a Base tx in the mempool is not a payout: it may revert or be dropped. The row stays signed_pending_broadcast and the
+    // rebroadcast loop settles it once the receipt says success. Expected, so not a failure to log or alert on.
+    throw new BroadcastDeferredError(hash);
   }
 
   // The signed tx of an attempt whose release call is known by hash, read back from the final NEAR tx. For a release that timed out
@@ -401,6 +399,7 @@ export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier
   const clock = x.clock ?? Date.now;
   const btc = makeBtc({ fetch: f, base: cfg.mempoolBase });
   const base = cfg.baseRpc ? makeBase({ fetch: f, rpcUrl: cfg.baseRpc }) : undefined;
+  const unsigned = new Map<string, string | null>(); // attempt id -> the contract's pending_tx, for rows with no stored hex
   const rows = () => x.db.listPayouts(new Date(clock() - DRAINED_LOOKBACK_MS).toISOString());
   const vault = makeVault({
     fetch: f, rpcUrl: cfg.nearRpc, vaultAccount: cfg.vaultAccount, agentAccount: cfg.agentAccount, hrp: cfg.btcHrp, signer, btc, base,
@@ -415,7 +414,14 @@ export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier
       let pendingAmount = 0n;
       for (const r of await rows()) {
         if (r.tier !== tier) continue;
-        const s = await x.db.getSignedTx(r.id);
+        let s = await x.db.getSignedTx(r.id);
+        if (!s && (r.outcome === "signed_pending_broadcast" || r.outcome === "broadcast_failed_terminal")) {
+          // no stored hex (a terminal row nobody could recover, or one whose signature never verified): the contract still holds the
+          // unsigned tx it asked the MPC to sign, which names the same coins and nonce. Immutable once signed, so read once.
+          let u = unsigned.get(r.id);
+          if (u === undefined) unsigned.set(r.id, (u = await vault.pendingTx(r.id)));
+          if (u) s = { chain: tier === 2 ? "evm" : "btc", hex: u }; // ponytail: the chain of a tier is fixed (1 and 3 Bitcoin, 2 Base); read it from get_tier if that changes
+        }
         if (!s) continue;
         if (s.chain === "btc") for (const c of inputsOf(s.hex)) outpoints.add(c);
         else if (r.outcome !== "broadcast_failed_terminal") {
@@ -460,7 +466,7 @@ export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier
         onSettled: x.onSettled,
         pendingTx: vault.pendingTx,
         txVerdict: vault.txVerdict,
-        receipt: hex => (base ? base.receipt(hex) : Promise.reject(new Error("no Base RPC configured"))),
+        receipt: async hex => (base ? base.receipt(hex) : { status: "pending" as const, txid: "" }), // no Base RPC: the broadcast step then fails, counted
         recover: p => vault.recoverSigned(p.release_tx!, p.id, p.tier),
         signedTx: id => x.db.getSignedTx(id),
         storeSignedTx: (id, chain, hex) => x.db.putSignedTx({ attempt_id: id, chain, hex }),

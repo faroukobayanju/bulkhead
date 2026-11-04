@@ -9,7 +9,7 @@ import { memoryCounter } from "../src/counter";
 import type { FirewallResult } from "../src/firewall/api";
 import { makeBudget } from "../src/firewall/budget";
 import { SlidingWindow } from "../src/firewall/window";
-import { BroadcastFailedError } from "../src/pipeline";
+import { BroadcastDeferredError, BroadcastFailedError } from "../src/pipeline";
 import { RateLimiter } from "../src/ratelimit";
 import { AttestError } from "../src/attest";
 import { trackCompletion } from "../src/completions";
@@ -377,6 +377,14 @@ describe("pipeline through the server", () => {
     expect(j.result.outcome).toBe("release_failed");
     expect(s.alerts.length).toBe(1);
     expect(s.alerts[0]![1]).toMatchObject({ code: "NoGasFundsError", tier: 2 });
+  });
+  test("a deferred (Base) settle is expected: the row is signed_pending_broadcast, the lock stays, and nobody is alerted", async () => {
+    const s = setup({ chain: { release: async () => { throw new BroadcastDeferredError("NEARTX"); } } });
+    const j: any = await s.go();
+    expect(j.result).toMatchObject({ outcome: "signed_pending_broadcast", txs: { near_tx: "NEARTX" } });
+    expect(j.result.deferred).toBeUndefined();
+    expect(s.alerts).toEqual([]);
+    expect(s.locks.has(1)).toBe(true);
   });
   test("signed but not broadcast: alert, no refund, the lock stays until onSettled", async () => {
     const s = setup({ chain: { release: async () => { throw new BroadcastFailedError("NEARTX"); } } });

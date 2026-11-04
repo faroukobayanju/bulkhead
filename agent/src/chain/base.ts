@@ -75,12 +75,13 @@ export function makeBase(o: { fetch: typeof fetch; rpcUrl: string; timeoutMs?: n
       if (have < need) throw new NoGasFundsError(have, need);
     },
     /** Has the tx mined, and did it succeed? Looked up by the hash of its signed hex. Only a receipt with status success is a payout. */
-    async receipt(rawHex: string): Promise<"success" | "pending" | "reverted"> {
+    async receipt(rawHex: string): Promise<{ status: "success" | "pending" | "reverted"; txid: string }> {
+      const txid = keccak256(rawHex as Hex);
       try {
-        const r = await client.getTransactionReceipt({ hash: keccak256(rawHex as Hex) });
-        return r.status === "success" ? "success" : "reverted";
+        const r = await client.getTransactionReceipt({ hash: txid });
+        return { status: r.status === "success" ? "success" : "reverted", txid };
       } catch (e) {
-        if ((e as Error)?.name === "TransactionReceiptNotFoundError") return "pending";
+        if ((e as Error)?.name === "TransactionReceiptNotFoundError") return { status: "pending", txid };
         return scrub(o.rpcUrl)(e);
       }
     },

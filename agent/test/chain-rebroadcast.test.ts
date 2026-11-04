@@ -7,22 +7,29 @@ import type { Config } from "../src/config";
 import type { ChainDeps } from "../src/server";
 
 import { COPY } from "../src/pipeline";
+import { TRANSITIONS } from "../../shared/attempt";
 const COPY_FAILED = COPY.failed;
 const NOW = Date.parse("2026-11-03T12:00:00Z");
 const ID = "01JB0000000000000000000001";
 const row = (o: Partial<Payout> = {}): Payout => ({ id: ID, tier: 1, outcome: "signed_pending_broadcast", ts: new Date(NOW - 60_000).toISOString(), near_tx: "nt", ...o });
 
+// The store refuses what the real one refuses (shared/attempt.ts), and the work list shows each row as its current outcome.
 function rig(rows: Payout[], o: Partial<RebroadcastDeps> = {}) {
+  const state = new Map(rows.map(r => [r.id, r.outcome as string]));
   const log = { updates: [] as [string, any][], alerts: [] as [string, any][], settled: [] as [number, string][], broadcasts: [] as string[], stored: [] as any[], verdicts: [] as [string, number][] };
   const d: RebroadcastDeps = {
-    payouts: async () => rows,
+    payouts: async () => rows.filter(r => state.get(r.id) === "releasing" || state.get(r.id) === "signed_pending_broadcast").map(r => ({ ...r, outcome: state.get(r.id) as Payout["outcome"] })),
     signedTx: async () => ({ chain: "btc", hex: "0200ff" }),
     storeSignedTx: async (id, chain, hex) => void log.stored.push({ id, chain, hex }),
     recover: async () => null,
     pendingTx: async () => null,
     txVerdict: async (h, ref) => (log.verdicts.push([h, ref]), "failed" as Verdict),
     broadcast: async (_c, hex) => (log.broadcasts.push(hex), "txid1"),
-    update: async (id, p) => void log.updates.push([id, p]),
+    update: async (id, p) => {
+      if (!TRANSITIONS[state.get(id)!]?.includes(p.outcome)) throw new Error(`bad_transition ${state.get(id)} to ${p.outcome}`);
+      state.set(id, p.outcome);
+      log.updates.push([id, p]);
+    },
     failures: memoryCounter(),
     alert: (k, x) => void log.alerts.push([k, x]),
     onSettled: (t, id) => void log.settled.push([t, id]),
@@ -37,7 +44,7 @@ describe("rebroadcastOnce", () => {
     const { d, log } = rig([row({ tier: 3 })]);
     expect(await rebroadcastOnce(d)).toMatchObject({ settled: 1, failed: 0, terminal: 0, reconciled: 0 });
     expect(log.broadcasts).toEqual(["0200ff"]);
-    expect(log.updates).toEqual([[ID, { outcome: "drained", chain_txid: "txid1" }]]);
+    expect(log.updates).toEqual([[ID, { outcome: "drained", chain_txid: "txid1", reply: COPY.paid }]]);
     expect(log.settled).toEqual([[3, ID]]);
   });
   test("an EVM payout goes to the evm broadcaster", async () => {
@@ -170,40 +177,65 @@ describe("rebroadcastOnce", () => {
     });
   });
 
-  describe("Base settles on the receipt", () => {
+  describe("Base settles on the receipt, checked before any broadcast", () => {
     const evm = row({ tier: 2 });
-    const mk = (st: "success" | "pending" | "reverted") => rig([evm], { signedTx: async () => ({ chain: "evm", hex: "0x02" }), receipt: async () => st });
-    test("success: drained and freed", async () => {
+    const mk = (status: "success" | "pending" | "reverted", o: Partial<RebroadcastDeps> = {}) => rig([evm], { signedTx: async () => ({ chain: "evm", hex: "0x02" }), receipt: async () => ({ status, txid: "0xhash" }), ...o });
+    test("success: drained with the receipt's hash and the drained copy, freed, and never broadcast again", async () => {
       const { d, log } = mk("success");
-      expect(await rebroadcastOnce(d)).toMatchObject({ settled: 1 });
-      expect(log.updates).toEqual([[ID, { outcome: "drained", chain_txid: "txid1" }]]);
+      expect(await rebroadcastOnce(d)).toMatchObject({ settled: 1, failed: 0 });
+      expect(log.updates).toEqual([[ID, { outcome: "drained", chain_txid: "0xhash", reply: COPY.paid }]]);
       expect(log.settled).toEqual([[2, ID]]);
+      expect(log.broadcasts).toEqual([]);
     });
-    test("pending: stays signed_pending_broadcast, lock kept, nothing counted", async () => {
+    test("a mined tx whose broadcast would fail (nonce too low) is never counted toward terminal", async () => {
+      const { d, log } = mk("success", { broadcast: async () => { throw new Error("nonce too low"); } });
+      for (let i = 0; i < 3; i++) await rebroadcastOnce(d);
+      expect(await d.failures.get(`rebroadcast:${ID}`)).toBe(0);
+      expect(log.updates).toHaveLength(1);
+    });
+    test("pending: broadcast again, stays signed_pending_broadcast, lock kept, nothing counted", async () => {
       const { d, log } = mk("pending");
       expect(await rebroadcastOnce(d)).toMatchObject({ settled: 0, waiting: 1, failed: 0 });
+      expect(log.broadcasts).toEqual(["0x02"]);
       expect(log.updates).toEqual([]);
       expect(log.settled).toEqual([]);
     });
-    test("reverted: terminal, alert (class only), lock kept", async () => {
+    test("pending and the broadcast fails: a counted failure", async () => {
+      const { d } = mk("pending", { broadcast: async () => { throw new Error("rejected"); } });
+      expect(await rebroadcastOnce(d)).toMatchObject({ failed: 1 });
+    });
+    test("reverted: terminal, alert (class only), lock kept, no broadcast", async () => {
       const { d, log } = mk("reverted");
       expect(await rebroadcastOnce(d)).toMatchObject({ terminal: 1 });
       expect(log.updates).toEqual([[ID, { outcome: "broadcast_failed_terminal" }]]);
       expect(log.alerts.map(a => a[0])).toEqual(["broadcast_failed_terminal"]);
       expect(log.alerts[0]![1]).toMatchObject({ error: "reverted" });
       expect(log.settled).toEqual([]);
+      expect(log.broadcasts).toEqual([]);
     });
-    test("a receipt that cannot be read is warned about, not counted, not drained", async () => {
+    test("a receipt that cannot be read is warned about, not counted, not drained, not broadcast", async () => {
       const warns: string[] = [];
-      const { d, log } = rig([evm], { signedTx: async () => ({ chain: "evm", hex: "0x02" }), receipt: async () => { throw new Error("rpc"); }, warn: w => void warns.push(w) });
+      const { d, log } = mk("success", { receipt: async () => { throw new Error("rpc"); }, warn: w => void warns.push(w) });
       await rebroadcastOnce(d);
       expect(warns).toEqual(["rebroadcast_row_failed"]);
       expect(log.updates).toEqual([]);
+      expect(log.broadcasts).toEqual([]);
       expect(await d.failures.get(`rebroadcast:${ID}`)).toBe(0);
     });
     test("Bitcoin has no receipt step", async () => {
       const { d } = rig([row()], { receipt: async () => { throw new Error("must not be asked"); } });
       expect(await rebroadcastOnce(d)).toMatchObject({ settled: 1 });
+    });
+  });
+
+  describe("a recovered hex that cannot be stored (item 3)", () => {
+    test("the lock is not freed at terminal until the hex is stored; the payout itself still broadcasts", async () => {
+      const lost = row({ release_tx: "H".repeat(44), release_ref_height: 500 });
+      const { d, log } = rig([lost], { signedTx: async () => null, recover: async () => ({ chain: "btc", hex: "beef" }), storeSignedTx: async () => { throw new Error("db"); }, broadcast: async () => { throw new Error("rejected"); } });
+      for (let i = 0; i < 10; i++) await rebroadcastOnce(d);
+      expect(log.updates).toEqual([[ID, { outcome: "broadcast_failed_terminal" }]]);
+      expect(log.settled).toEqual([]);
+      expect(log.alerts[0]![1]).toMatchObject({ fix: expect.stringContaining("owner action") });
     });
   });
 
@@ -259,9 +291,10 @@ describe("rebroadcastOnce", () => {
       test(`a pending_tx and a ${v} release tx: a failure each tick; the tenth is terminal, alerted with the class only, lock kept (no hex)`, async () => {
         const { d, log } = rig([old({ release_tx: "H".repeat(44), release_ref_height: 9 })], { signedTx: async () => null, pendingTx: async () => "0200", txVerdict: async () => v });
         for (let i = 0; i < 9; i++) expect(await rebroadcastOnce(d)).toMatchObject({ failed: 1, terminal: 0 });
-        expect(log.updates).toEqual([]);
+        expect(log.updates).toEqual([[ID, { outcome: "signed_pending_broadcast" }]]); // pending_tx proves the contract took the request; the store only allows terminal from here
         expect(await rebroadcastOnce(d)).toMatchObject({ failed: 1, terminal: 1 });
-        expect(log.updates).toEqual([[ID, { outcome: "broadcast_failed_terminal" }]]);
+        expect(log.updates.at(-1)).toEqual([ID, { outcome: "broadcast_failed_terminal" }]);
+        expect(log.alerts.map(a => a[0])).toEqual(["broadcast_failed_terminal"]);
         expect(JSON.stringify(log.alerts)).not.toContain("0200");
         expect(log.settled).toEqual([]);
       });

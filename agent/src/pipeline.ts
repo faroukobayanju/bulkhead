@@ -80,6 +80,9 @@ export class BroadcastFailedError extends Error {
   }
 }
 
+/** Base only: the tx is signed and sent, and settles on its receipt (the rebroadcast loop). Expected, not a failure: no warning, no alert. */
+export class BroadcastDeferredError extends BroadcastFailedError {}
+
 export type TierState = { status: "open" | "releasing" | "drained"; retryAfterS: number };
 export type PublicFirewall = Omit<FirewallResult, "reason">;
 export type AttemptResult = {
@@ -88,6 +91,7 @@ export type AttemptResult = {
   reply: string;
   firewall?: { a?: PublicFirewall; b?: PublicFirewall };
   txs?: { nearTx: string; chainTxid?: string };
+  deferred?: boolean; // signed_pending_broadcast that is expected (Base): the server does not alert on it
 };
 export type PipelineInput = { tier: Tier; account: string; ip: string; message: string; payoutAddress: string; consentVersion: string };
 export type PipelineDeps = {
@@ -130,6 +134,7 @@ export const COPY = {
   otherPayee: "The agent tried to pay someone else.",
   fumbled: "The agent fumbled the tool call.",
   signed: "You won. The payout is signed on-chain and being broadcast; see /verify.",
+  paid: "You won. The payout was broadcast and has confirmed; see /verify.",
   failed: "The agent agreed, but the payout failed before signing. The tier stays open.",
 };
 
@@ -305,12 +310,12 @@ export async function runAttempt(d: PipelineDeps, inp: PipelineInput): Promise<A
   // read for the transaction ids, and a missing or odd one never turns a payout into a failure.
   let paid: unknown;
   let ok = false;
-  let signed: { nearTx?: string } | undefined;
+  let signed: { nearTx?: string; deferred?: boolean } | undefined;
   try {
     paid = await d.release(tier, id, payee.address);
     ok = true;
   } catch (e) {
-    if (e instanceof BroadcastFailedError) signed = { nearTx: e.nearTx };
+    if (e instanceof BroadcastFailedError) signed = { nearTx: e.nearTx, deferred: e instanceof BroadcastDeferredError };
     else {
       // Unknown: did the contract sign before this threw? Only a clear `false` is "no". A false "failed" would invite a second payout.
       let no = false;
@@ -338,7 +343,7 @@ export async function runAttempt(d: PipelineDeps, inp: PipelineInput): Promise<A
     // the lock stays: the tier is paid on-chain, and the rebroadcast loop settles it
     await update({ outcome: "signed_pending_broadcast", reply: COPY.signed, ...(signed.nearTx !== undefined && { near_tx: signed.nearTx }) });
     stage("done");
-    return { id, outcome: "signed_pending_broadcast", reply: COPY.signed, ...(signed.nearTx !== undefined && { txs: { nearTx: signed.nearTx } }), ...firewall() };
+    return { id, outcome: "signed_pending_broadcast", reply: COPY.signed, ...(signed.nearTx !== undefined && { txs: { nearTx: signed.nearTx } }), ...(signed.deferred && { deferred: true }), ...firewall() };
   }
   try {
     await update({ outcome: "release_failed", reply: COPY.failed });
