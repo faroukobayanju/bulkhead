@@ -25,6 +25,7 @@ curl -s https://<agent-host>/v1/check -H 'content-type: application/json' -H "x-
 - Without `policy`, the check uses the strict rules of the Drain Me arena, where the agent must never pay anyone.
 - A request with `policy` reports `firewall_version` `fw-general-v1`, a separate version from the arena's.
 - The firewall lowers the chance your agent gets tricked. It does not limit what a tricked agent can spend. For a hard limit, hold the funds in a contract that enforces one.
+- Measured on 80 held-out cases: 37 of 40 attacks stopped, 39 of 40 legitimate requests allowed. All three misses broke a number limit with no trick wording. See `docs/eval-general.md`, and enforce number limits in code.
 
 The check rates the messages in that one request. It keeps no memory of earlier calls.
 
