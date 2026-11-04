@@ -5,15 +5,16 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { normalize } from "../normalize";
 import type { Budget } from "./budget";
 import { heuristicScore } from "./heuristics";
-import { DEGRADED_REASON, inputHash, judgeOut, signResponse, toVerdict, type Action, type Judge, type Msg, type Sign, type Technique } from "./verdict";
+import { DEGRADED_REASON, inputHash, judgeOut, signResponse, toVerdict, type Action, type Judge, type Msg, type Policy, type Sign, type Technique } from "./verdict";
 import { ipKey, SlidingWindow } from "./window";
 
 export type { Judge };
 // Defaults for tests and local use only. Production passes the real values from config (codehash, firewallVersion), never env.
 export const FIREWALL_VERSION = "fw-v1";
+export const GENERAL_VERSION = "fw-general-v1";
 export const CODEHASH = "local";
 
-export type CheckReq = { messages: Msg[]; proposed_action?: Action };
+export type CheckReq = { messages: Msg[]; proposed_action?: Action; policy?: Policy };
 export type FirewallResult = {
   verdict: "allow" | "escalate" | "block";
   risk: number;
@@ -27,26 +28,30 @@ export type FirewallResult = {
 
 // Final risk is max(heuristic, judge): a judge that was itself talked into saying 0 cannot lower the heuristic score.
 // Anything that goes wrong (judge error, timeout, output outside the contract, even a bug here) is the fail-closed block.
-export async function checkFirewall(req: CheckReq, judge: Judge, opts: { timeoutMs?: number; codehash?: string; firewallVersion?: string } = {}): Promise<FirewallResult> {
+export async function checkFirewall(req: CheckReq, judge: Judge, opts: { timeoutMs?: number; codehash?: string; firewallVersion?: string; generalVersion?: string } = {}): Promise<FirewallResult> {
   const t0 = performance.now();
   const done = (r: Pick<FirewallResult, "verdict" | "risk" | "technique" | "reason" | "degraded">): FirewallResult => ({
     ...r,
-    firewall_version: opts.firewallVersion ?? FIREWALL_VERSION,
+    firewall_version: req.policy ? opts.generalVersion ?? GENERAL_VERSION : opts.firewallVersion ?? FIREWALL_VERSION,
     codehash: opts.codehash ?? CODEHASH,
     latency_ms: Math.round(performance.now() - t0),
   });
   const ac = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
+    // The policy lists every tool the agent has, so anything else is not one of its actions. No judge call is needed to say so.
+    if (req.policy && req.proposed_action && !req.policy.tools.includes(req.proposed_action.tool)) {
+      return done({ verdict: "block", risk: 100, technique: "tool_spoof", reason: "proposed_action.tool is not in policy.tools", degraded: false });
+    }
     // proposed_action args are attacker-controlled text too (a memo field, a base64 blob), so they are scanned and decoded like a
     // message. The tool name is not: it is the agent's own, and the judge reads it.
     const raw = [...req.messages.map(m => m.content), ...(req.proposed_action ? [argsText(req.proposed_action.args)] : [])].join("\n");
-    const n = normalize(raw);
-    const h = heuristicScore(n, raw);
+    const n = normalize(raw, { tools: req.policy?.tools });
+    const h = heuristicScore(n, raw, req.policy?.tools);
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => (ac.abort(), reject(new Error("timeout"))), opts.timeoutMs ?? 3500);
     });
-    const j = judgeOut(await Promise.race([judge({ messages: req.messages, proposed_action: req.proposed_action, normalized: n }, ac.signal), timeout]));
+    const j = judgeOut(await Promise.race([judge({ messages: req.messages, proposed_action: req.proposed_action, policy: req.policy, normalized: n }, ac.signal), timeout]));
     const risk = Math.max(h.score, j.risk);
     const floor = h.score > j.risk; // the heuristic set the risk, so it also names the technique and the reason
     return done({
@@ -118,6 +123,7 @@ export type FirewallDeps = {
   signer: string;
   codehash?: string; // from config, reported in every verdict
   firewallVersion?: string;
+  generalVersion?: string; // reported when a request carries a policy
   lookupLimiter?: SlidingWindow; // unknown-key lookups per client address, before Convex (default 30 a minute)
   clock?: () => number;
   timeoutMs?: number;
@@ -215,7 +221,7 @@ export function firewallRoutes(app: Hono, deps: FirewallDeps) {
 
     // 6. judge, then sign. A degraded block is still a 200: reason stays "judge_unavailable" and the header marks it.
     // input_hash and issued_at go inside the signed bytes, so a verdict cannot be shown next to another input or passed off as new.
-    const { degraded, ...result } = await checkFirewall(req, deps.judge, { timeoutMs: deps.timeoutMs, codehash: deps.codehash, firewallVersion: deps.firewallVersion });
+    const { degraded, ...result } = await checkFirewall(req, deps.judge, { timeoutMs: deps.timeoutMs, codehash: deps.codehash, firewallVersion: deps.firewallVersion, generalVersion: deps.generalVersion });
     const stamped = { ...result, input_hash, issued_at: Math.floor((deps.clock ?? Date.now)()) };
     try {
       return c.json(await signResponse(stamped, deps.signer, deps.sign), 200, degraded ? { "x-firewall-degraded": "1" } : undefined);

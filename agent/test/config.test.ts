@@ -22,6 +22,11 @@ describe("config", () => {
     expect(c).toMatchObject({ mock: true, network: "testnet", codehash: "local", btcHrp: "tb", port: 8787, llmTimeoutMs: 20000, judgeTimeoutMs: 3500 });
     expect(c.models[1]).toBe("deepseek-ai/DeepSeek-V4.1-Flash-1017");
   });
+  test("the general-mode firewall version defaults to fw-general-v1 and can be set", () => {
+    expect(loadConfig(mock).firewallGeneralVersion).toBe("fw-general-v1");
+    expect(loadConfig(main).firewallGeneralVersion).toBe("fw-general-v1");
+    expect(loadConfig({ ...main, FIREWALL_GENERAL_VERSION: "fw-general-v2" }).firewallGeneralVersion).toBe("fw-general-v2");
+  });
   test("a full testnet and a full mainnet config load", () => {
     expect(loadConfig(testnet).mock).toBe(false);
     expect(loadConfig(main)).toMatchObject({ btcHrp: "bc", codehash: "ab".repeat(32) });

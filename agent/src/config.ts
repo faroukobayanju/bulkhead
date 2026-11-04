@@ -28,6 +28,7 @@ export type Config = {
   tierEnabled: { 1: boolean; 2: boolean; 3: boolean };
   codehash: string;
   firewallVersion: string;
+  firewallGeneralVersion: string;
   siteUrl: string;
   alertWebhookUrl: string | undefined;
   rateLimitScale: number;
@@ -71,6 +72,7 @@ export const ENV_DOC: readonly (readonly [name: string, need: string, what: stri
   ["TIER_ENABLED_3", "optional", "1 (default) or 0"],
   ["CODEHASH", "required unless MOCK_LLM", "measured image hash reported by /attestation and in every verdict; mock defaults to local, nothing else does"],
   ["FIREWALL_VERSION", "required on mainnet", "firewall version reported in every verdict; testnet and mock default to fw-v1"],
+  ["FIREWALL_GENERAL_VERSION", "optional", "firewall version reported for requests that send a policy (general mode); default fw-general-v1"],
   ["SITE_URL", "required on mainnet", "public site, the base of docs_url in error bodies"],
   ["ALERT_WEBHOOK_URL", "optional", "https URL that receives operator alerts; unset means no alerts"],
   ["DATASET_DEPLOY_KEY", "export job only", "Convex deploy key used by the dataset export, never by the agent"],
@@ -172,6 +174,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     // No "local" fallback outside mock mode: an agent that cannot say what it runs does not start, testnet included.
     codehash: mock ? (get("CODEHASH") ?? "local") : need("CODEHASH"),
     firewallVersion: dev ? (get("FIREWALL_VERSION") ?? "fw-v1") : need("FIREWALL_VERSION"),
+    firewallGeneralVersion: get("FIREWALL_GENERAL_VERSION") ?? "fw-general-v1",
     siteUrl: (dev ? get("SITE_URL") ?? "" : need("SITE_URL")).replace(/\/+$/, ""),
     alertWebhookUrl: get("ALERT_WEBHOOK_URL"),
     rateLimitScale: scale,

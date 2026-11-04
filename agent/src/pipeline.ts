@@ -163,7 +163,7 @@ function gate(st: TierState) {
 
 // The injected firewall for tier 3: take one call off the arena pool (the same pool replay uses; the API and playground pools are
 // never touched), then run the judge. A pool that is used up, or cannot be read, is an error and the judge is not called.
-export function makeArenaFirewall(o: { budget: Pick<Budget, "chargeArena">; judge: Judge; timeoutMs?: number; codehash?: string; firewallVersion?: string }) {
+export function makeArenaFirewall(o: { budget: Pick<Budget, "chargeArena">; judge: Judge; timeoutMs?: number; codehash?: string; firewallVersion?: string; generalVersion?: string }) {
   return async (req: CheckReq): Promise<FirewallResult> => {
     let ok: boolean;
     try {
@@ -172,7 +172,7 @@ export function makeArenaFirewall(o: { budget: Pick<Budget, "chargeArena">; judg
       throw new BudgetUnavailableError();
     }
     if (!ok) throw new BudgetExhaustedError();
-    return checkFirewall(req, o.judge, { timeoutMs: o.timeoutMs, codehash: o.codehash, firewallVersion: o.firewallVersion });
+    return checkFirewall(req, o.judge, { timeoutMs: o.timeoutMs, codehash: o.codehash, firewallVersion: o.firewallVersion, generalVersion: o.generalVersion });
   };
 }
 

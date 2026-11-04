@@ -94,7 +94,7 @@ export async function start(env: Record<string, string | undefined> = process.en
     chain,
     db: Object.assign(db, { getAttempt }),
     chat,
-    arenaFirewall: makeArenaFirewall({ budget, judge, timeoutMs: cfg.judgeTimeoutMs, codehash: cfg.codehash, firewallVersion: cfg.firewallVersion }),
+    arenaFirewall: makeArenaFirewall({ budget, judge, timeoutMs: cfg.judgeTimeoutMs, codehash: cfg.codehash, firewallVersion: cfg.firewallVersion, generalVersion: cfg.firewallGeneralVersion }),
     attest,
     promptSha: prompts.sha,
     firewall: {
@@ -106,6 +106,7 @@ export async function start(env: Record<string, string | undefined> = process.en
       signer: signerId,
       codehash: cfg.codehash,
       firewallVersion: cfg.firewallVersion,
+      generalVersion: cfg.firewallGeneralVersion,
       timeoutMs: cfg.judgeTimeoutMs,
     },
     limiter: new RateLimiter(cfg.rateLimitScale),
