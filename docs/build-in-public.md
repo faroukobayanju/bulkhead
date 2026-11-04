@@ -81,3 +81,9 @@ Then we gave it a fake amount to sign. Bitcoin refused the transaction. So the s
 The payment, on Bitcoin testnet4: https://mempool.space/testnet4/tx/a8ecea7c06b387f86349322cf025233c3f170e69a2a31f27e274e70ae89e8b1a
 
 Also built: the firewall, wallet sign-in and the game engine. Next: the payout server, the website and the TEE deploy. Still testnet only, submitting Nov 14.
+
+## Task 9: payout server
+
+The part of Bulkhead that actually sends money took five review rounds. Each fix to "what happens after a crash" created a new edge case.
+
+The rule we ended on: when in doubt, keep the tier locked and alert a human. A stuck payout is fixable. A double payout isn't. #NEARHackathon
