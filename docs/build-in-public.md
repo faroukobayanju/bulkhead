@@ -69,3 +69,15 @@ Now any reply that isn't one clean JSON object gets blocked. #NEARHackathon
 Built the game engine for Drain Me. My favorite rule: if we can't tell whether the contract signed a payout, we treat it as signed. Marking it "failed" by mistake could open the door to a second payout.
 
 Every payout is also written down before any money moves. #NEARHackathon
+
+## Progress update, 2026-11-04 (attach `assets/brand/update-2026-11-04.png`)
+
+Bulkhead update for #NEARHackathon: our NEAR contract signed a real Bitcoin testnet payment, and no person holds that key.
+
+Then we gave it a fake amount to sign. Bitcoin refused the transaction. So the spending cap holds even if the AI lies about the numbers.
+
+### Reply: proof and what's next
+
+The payment, on Bitcoin testnet4: https://mempool.space/testnet4/tx/a8ecea7c06b387f86349322cf025233c3f170e69a2a31f27e274e70ae89e8b1a
+
+Also built: the firewall, wallet sign-in and the game engine. Next: the payout server, the website and the TEE deploy. Still testnet only, submitting Nov 14.
