@@ -341,13 +341,18 @@ export function makeVault(o: VaultOpts) {
   }
 
   // release_funds with a payload the caller built, skipping every local check (cap, coins, fees). Only the attack demo uses it, to
-  // show the contract's own refusals. A panic is a ContractRefusedError; returns the NEAR tx hash.
+  // show the contract's own refusals. A panic is a ContractRefusedError and no release_signed event (the MPC refused) is a
+  // SignFailedError, as in release(). Returns the NEAR tx hash.
   async function releaseWith(tier: TierId, attemptId: string, recipient: string, payload: unknown): Promise<string> {
     const hash = await send("release_funds", { tier_id: tier, attempt_id: attemptId, recipient, payload }, RELEASE_GAS);
-    const fail = (await waitFinal(hash)).status?.Failure;
-    if (!fail) return hash;
-    const m = JSON.stringify(fail).match(/Smart contract panicked: (ERR_[A-Z0-9_]+)/);
-    throw m ? new ContractRefusedError(m[1]!) : new Error("release_funds failed on-chain");
+    const r = await waitFinal(hash);
+    const fail = r.status?.Failure;
+    if (fail) {
+      const m = JSON.stringify(fail).match(/Smart contract panicked: (ERR_[A-Z0-9_]+)/);
+      throw m ? new ContractRefusedError(m[1]!) : new Error("release_funds failed on-chain");
+    }
+    if (!events(r).some(e => e.event === "release_signed" && e.data?.attempt_id === attemptId)) throw new SignFailedError();
+    return hash;
   }
 
   // E22: only a FullAccess key may log in as the account. An RPC failure throws; false means the RPC said the key is not there

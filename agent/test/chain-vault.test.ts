@@ -312,7 +312,7 @@ describe("release, contract errors", () => {
 describe("releaseWith (a payload the caller built, for the attack demo)", () => {
   const forged = { Bitcoin: { utxos: [{ txid: "00".repeat(32), vout: 0, value_sat: 2_000_001 }], fee_rate_sat_vb: 1 } };
   test("sends release_funds with the payload unchanged at 300 TGas, with no local checks", async () => {
-    const r = rig({ tx: () => txResult([]) });
+    const r = rig({ tx: () => txResult(btcSigned()) });
     const hash = await r.vault.releaseWith(1, ATTEMPT, RECIPIENT, forged);
     expect(typeof hash).toBe("string");
     const c = call(r.sentTxs[0]!);
@@ -326,6 +326,12 @@ describe("releaseWith (a payload the caller built, for the attack demo)", () => 
     const res = (await settle(r.vault.releaseWith(1, ATTEMPT, RECIPIENT, forged))) as { e: ContractRefusedError };
     expect(res.e).toBeInstanceOf(ContractRefusedError);
     expect(res.e.code).toBe("ERR_OVER_CAP");
+  });
+  test("a release_failed event (the MPC refused) is SignFailedError, not success", async () => {
+    const r = rig({ tx: () => txResult([ev("release_failed", { tier: 1, attempt_id: ATTEMPT })]) });
+    expect(((await settle(r.vault.releaseWith(1, ATTEMPT, RECIPIENT, forged))) as { e: Error }).e).toBeInstanceOf(SignFailedError);
+    const other = rig({ tx: () => txResult(btcSigned("01JB0000000000000000000009")) }); // signed, but for another attempt
+    expect(((await settle(other.vault.releaseWith(1, ATTEMPT, RECIPIENT, forged))) as { e: Error }).e).toBeInstanceOf(SignFailedError);
   });
 });
 

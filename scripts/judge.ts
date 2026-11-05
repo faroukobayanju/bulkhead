@@ -9,15 +9,17 @@ type IO = { log: (s: string) => void; run: Run; has: (bin: string) => boolean };
 const path = (rel: string) => fileURLToPath(new URL(rel, import.meta.url));
 const ROOT = path("..");
 const AGENT = path("../agent");
+const SCRIPTS = path(".");
 const run: Run = (cmd, cwd) => Bun.spawn(cmd, { cwd, stdio: ["inherit", "inherit", "inherit"] }).exited;
 
 export async function main(io: Partial<IO> = {}): Promise<number> {
   const { log = console.log, run: exec = run, has = (b: string) => Bun.which(b) !== null } = io;
-  log("Bulkhead judge check. The attack demo uses a mock model (MOCK_LLM fixtures), not NEAR AI: nothing here calls a model or a chain.");
-  log("Live evidence (testnet and mainnet transactions, measured block rates) is in docs/claims.md.");
+  log("Bulkhead judge check. The attack demo uses a mock model (MOCK_LLM judge fixture), not NEAR AI, and calls no chain.");
+  log("No keys or wallet; the first run downloads packages and the contract sandbox. Live evidence is in docs/claims.md.");
   const bun = process.execPath;
   const steps: [name: string, cmd: string[], cwd: string][] = [
     ["agent tests", [bun, "test"], AGENT],
+    ["deploy script tests", [bun, "test", "./test/vault-deploy.test.ts"], SCRIPTS], // pure functions, offline
     ["attack demo (--local)", [bun, path("attack-demo.ts"), "--local"], ROOT],
   ];
   const missing = ["cargo", "cargo-near", "docker"].filter(b => !has(b));
