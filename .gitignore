@@ -9,3 +9,5 @@ target
 .superpowers/
 .claude/worktrees/
 near-hackathon-ideas.md
+convex/_generated/
+convex/tsconfig.json
