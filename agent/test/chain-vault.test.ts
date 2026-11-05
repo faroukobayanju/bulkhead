@@ -309,6 +309,26 @@ describe("release, contract errors", () => {
   });
 });
 
+describe("releaseWith (a payload the caller built, for the attack demo)", () => {
+  const forged = { Bitcoin: { utxos: [{ txid: "00".repeat(32), vout: 0, value_sat: 2_000_001 }], fee_rate_sat_vb: 1 } };
+  test("sends release_funds with the payload unchanged at 300 TGas, with no local checks", async () => {
+    const r = rig({ tx: () => txResult([]) });
+    const hash = await r.vault.releaseWith(1, ATTEMPT, RECIPIENT, forged);
+    expect(typeof hash).toBe("string");
+    const c = call(r.sentTxs[0]!);
+    expect(c.method).toBe("release_funds");
+    expect(c.args).toEqual({ tier_id: 1, attempt_id: ATTEMPT, recipient: RECIPIENT, payload: forged });
+    expect(c.gas).toBe(300_000_000_000_000n);
+    expect(r.calls.some(x => x.params?.method_name === "get_tier")).toBe(false);
+  });
+  test("a contract panic is ContractRefusedError with the contract's code", async () => {
+    const r = rig({ tx: () => failure("Smart contract panicked: ERR_OVER_CAP") });
+    const res = (await settle(r.vault.releaseWith(1, ATTEMPT, RECIPIENT, forged))) as { e: ContractRefusedError };
+    expect(res.e).toBeInstanceOf(ContractRefusedError);
+    expect(res.e.code).toBe("ERR_OVER_CAP");
+  });
+});
+
 describe("release, waiting for FINAL", () => {
   test("polls through unknown-transaction and timeout answers until final", async () => {
     const r = rig({ tx: n => (n === 0 ? rpcErr("UNKNOWN_TRANSACTION") : n === 1 ? rpcErr("TIMEOUT_ERROR") : txResult(btcSigned())) });
