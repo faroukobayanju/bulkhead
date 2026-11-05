@@ -185,6 +185,10 @@ export function makeDb(o: { fetch: typeof fetch; siteUrl: string; secret: string
     async insertReplay(r: { attempt_id: string; fw_version: string; verdict: "allow" | "escalate" | "block"; risk: number }) {
       return bool(await call("replay_put", r));
     },
+    // Tier 1 and 2 rows that called the tool and have no replay for `fwVersion`. Page with `next` until `done`.
+    async replayTodo(fwVersion: string, cursor: string | null = null, limit = 100) {
+      return (await call("replay_todo", { fw_version: fwVersion, cursor, limit })) as { rows: { id: string; message: string; payout_address: string }[]; next: string; done: boolean };
+    },
     // `hash` is the sha256 of the key, never the key.
     async apiKeyExists(keyHash: string) {
       return bool(await call("key_exists", { key_hash: keyHash }));

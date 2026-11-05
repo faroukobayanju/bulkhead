@@ -22,6 +22,7 @@ export const OPS: Record<string, ReturnType<typeof op>> = {
   attempt_report: op("attempts:report", attempts.report),
   attempts_export: op("attempts:exportPage", attempts.exportPage),
   replay_put: op("records:putReplay", records.putReplay),
+  replay_todo: op("attempts:replayTodo", attempts.replayTodo),
   key_exists: op("records:keyExists", records.keyExists),
   key_put: op("records:putKey", records.putKey),
   signed_tx_put: op("records:putSignedTx", records.putSignedTx),

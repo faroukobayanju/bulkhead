@@ -386,6 +386,7 @@ export function makeVault(o: VaultOpts) {
     wasSigned,
     viewAccessKey,
     logAttemptRoots,
+    getRoots: (day: number): Promise<[number, string][]> => vaultView("get_roots", { day }),
     getTier,
     recoverSigned,
     txVerdict,
@@ -466,6 +467,7 @@ export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier
     wasSigned: (tier: Tier, attemptId: string) => vault.wasSigned(tier, attemptId),
     storeSignedTx: async (attemptId: string, chain: "btc" | "evm", hex: string) => void (await x.db.putSignedTx({ attempt_id: attemptId, chain, hex })),
     logAttemptRoots: vault.logAttemptRoots,
+    getRoots: vault.getRoots,
     /** The attempts a restart must treat as holding their tier: rows still `releasing` or `signed_pending_broadcast`. */
     pendingPayouts: pending,
     /** Startup check: BASE_RPC is the chain the Base tier is on. Throws on a mismatch; a vault with no Base tier passes. */

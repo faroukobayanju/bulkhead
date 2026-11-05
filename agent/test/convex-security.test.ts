@@ -70,6 +70,7 @@ describe("a client with no secret cannot write through anything", () => {
     attempt_report: { attempt_id: wireRow().id, account_hash: H("1") },
     attempts_export: { since: "", cursor: null, limit: 10 },
     replay_put: { attempt_id: idN(1), fw_version: "fw-v1", verdict: "block", risk: 90 },
+    replay_todo: { fw_version: "fw-v1", cursor: null, limit: 10 },
     key_exists: { key_hash: H("a") },
     key_put: { key_hash: H("a") },
     signed_tx_put: { attempt_id: wireRow().id, chain: "btc", hex: "abcd" },
@@ -104,7 +105,7 @@ describe("a client with no secret cannot write through anything", () => {
 
   test("with the right secret the same bodies are accepted (the 401s above are about the secret and nothing else)", async () => {
     await s.post("attempt_insert", wireRow({ outcome: "releasing", stage: "signing" }));
-    for (const op of ["health", "attempts_export", "key_exists", "signed_tx_get", "counter_get", "attempt_stage", "attempt_get"]) {
+    for (const op of ["health", "attempts_export", "replay_todo", "key_exists", "signed_tx_get", "counter_get", "attempt_stage", "attempt_get"]) {
       expect((await s.post(op, bodyFor[op])).status, op).toBe(200);
     }
   });
