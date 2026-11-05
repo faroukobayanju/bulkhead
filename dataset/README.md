@@ -7,6 +7,16 @@ Every attempt made against the Drain Me arena, one UTC day per file. Each day ha
 
 The agent also writes each day's roots to the vault contract with `log_attempt_roots(day, roots)`. A day can be written only once, so the files cannot be changed later without the change showing.
 
+A day with no attempts gets empty files and no roots on-chain. The contract's `get_roots` returns `[]` both for a day that was never written and for a day written with an empty list, so posting nothing says the same thing and costs no gas. `verify-roots` passes such a day when both sides are empty.
+
+## How the files are made
+
+`scripts/export-dataset.ts` runs from cron at 00:10 UTC each day and exports the day before. It refuses a day until 5 minutes after the day ends, so that rows written just before midnight are in. A run at 00:00 would refuse.
+
+It runs on the agent host with the agent's env. The agent's clock sets each row's `ts`, and the export's clock decides when a day is over. On a machine whose clock is behind the agent's, the export could close a day before its last rows are in.
+
+`--post-roots` writes the roots on-chain. Today it signs with `AGENT_PRIVATE_KEY`, which exists only on testnet. The signer from the Shade Agent API is wired in Task 10, and mainnet roots wait for it.
+
 ## Verify a day
 
 ```
@@ -58,7 +68,7 @@ Only the leaf fields are covered by the roots. The other columns (`normalized`, 
 | `hidden` | boolean | hidden from the site after reports. Hidden rows stay in the dataset |
 | `leaf` | string | the Merkle leaf above |
 
-The dataset never contains the player's IP hash, account name or full payout address.
+The dataset never contains the player's IP hash or account name. The payout address appears only where the player typed it in `message`. Everywhere else it is replaced with `<payout>`: in the model's tool calls (`llm_output`), the firewall reasons, `reply` and `normalized`. A winner's shortened address is in `payout`. The replacement does not touch the leaf fields, so roots still verify. A row whose `reply` quoted the address no longer matches its `signature`.
 
 ## Messages and consent
 

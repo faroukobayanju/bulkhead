@@ -1,7 +1,11 @@
 // The nightly dataset export (E7, E20): one UTC day of attempts as JSONL plus that day's hourly Merkle roots, then, with
-// --post-roots, the roots on-chain with log_attempt_roots (once per day). Runs with the agent's env, after midnight UTC.
+// --post-roots, the roots on-chain with log_attempt_roots (once per day).
 //   bun scripts/export-dataset.ts [--date YYYY-MM-DD] [--post-roots]      (default: yesterday)
 // Every row's stored leaf is recomputed first; one that differs stops the export and names the attempt.
+// - Cron: 00:10 UTC daily. A day is refused until 5 minutes after it ends, so a run at 00:00 would refuse.
+// - Run it on the agent host, with the agent's env: the agent's clock writes each row's ts, and this clock decides when the day is
+//   over. On another machine a clock behind the agent's could close a day before its last rows are in.
+// - --post-roots signs with AGENT_PRIVATE_KEY, which only exists on testnet today. The Shade Agent signer is wired in Task 10.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ConfigError, loadConfig, type Config } from "../agent/src/config";
@@ -20,26 +24,37 @@ type RootsVault = { getRoots(day: number): Promise<[number, string][]>; logAttem
 type IO = { fetch: typeof fetch; log: (s: string) => void; now: () => number; dir: string; db: Pick<Db, "listAttempts">; vault: RootsVault };
 
 const FW_KEYS = ["verdict", "risk", "technique", "reason", "firewall_version", "codehash", "latency_ms", "degraded"] as const;
-const fw = (x: Record<string, unknown> | null | undefined) => (x ? Object.fromEntries(FW_KEYS.map(k => [k, x[k]])) : null);
+type Hide = <T>(x: T) => T;
+const fw = (x: Record<string, unknown> | null | undefined, hide: Hide) => (x ? Object.fromEntries(FW_KEYS.map(k => [k, hide(x[k])])) : null);
+// The row's payout address becomes "<payout>" wherever the model, the judge or the normalizer repeated it (a tool call's
+// recipient, a reason quoting it). Case-insensitive, for EVM addresses written in lowercase.
+const hider = (addr: unknown): Hide => {
+  if (typeof addr !== "string" || !addr) return x => x;
+  const re = new RegExp(addr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+  return <T,>(x: T) => (typeof x === "string" ? (x.replace(re, "<payout>") as T) : x);
+};
 
 // The public columns, picked one by one: a new column stays out until it is added here. Never ip_hash; account_hash is the peppered
 // hash. Left out on purpose: the raw payout_address (only a winner's, shortened, as `payout`, like the public view), stage, and the
 // recovery state (release_tx, release_ref_height, settled_at). Hidden rows stay in, with `hidden: true`. Firewall reasons are in.
+// The payout address is also removed from every text column but `message`, the player's own text, so a near miss's address stays
+// private as in the public view. A row whose reply quoted it no longer matches its signature.
 export function toExportRow(r: Record<string, any>) {
+  const hide = hider(r.payout_address);
   return {
     id: r.id,
     ts: r.ts,
     tier: r.tier,
     account_hash: r.account_hash,
     message: r.message, // player text, published by consent
-    normalized: r.normalized,
+    normalized: hide(r.normalized),
     outcome: r.outcome,
     technique: r.technique ?? null,
     tool_called: r.tool_called,
-    fw_a: fw(r.fw_a),
-    fw_b: fw(r.fw_b),
-    llm_output: r.llm_output ?? null,
-    reply: r.reply,
+    fw_a: fw(r.fw_a, hide),
+    fw_b: fw(r.fw_b, hide),
+    llm_output: hide(r.llm_output ?? null),
+    reply: hide(r.reply),
     payout: attemptView(r as ViewInput).payout,
     prompt_sha256: r.prompt_sha256,
     model_id: r.model_id,
@@ -83,6 +98,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
   if (post && !vault) {
     if (!cfg.vaultAccount) return refuse(log, "--post-roots needs VAULT_ACCOUNT");
     try {
+      // ponytail: signs with the testnet AGENT_PRIVATE_KEY (makeChainDeps throws without it); pass the Shade signer once Task 10 has it
       vault = makeChainDeps(cfg, { db: db as never, onSettled: () => {}, fetch: http });
     } catch (e) {
       return refuse(log, `--post-roots: ${(e as Error).message}`);

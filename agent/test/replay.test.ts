@@ -14,6 +14,7 @@ const lines = () => {
   const out: string[] = [];
   return { out, log: (x: string) => void out.push(x), text: () => out.join("\n") };
 };
+const today = () => new Date().toISOString().slice(0, 10);
 const todo = (o: Record<string, unknown> = {}) => s.post("replay_todo", { fw_version: "fw-v1", cursor: null, limit: 50, ...o }).then(r => r.json.result);
 const insert = (n: number, o: Record<string, unknown> = {}) => s.post("attempt_insert", wireRow({ id: idN(n), ts: `2026-11-02T12:00:${String(n).padStart(2, "0")}.000Z`, tier: 1, tool_called: true, outcome: "tool_error", ...o }));
 
@@ -133,33 +134,71 @@ describe("replay with a fake judge", () => {
     expect((await todo()).rows.length).toBe(2);
   });
 
-  test("with the real judge client, stops once estimated spend reaches --max-usd", async () => {
-    for (const n of [1, 2, 3]) await insert(n);
-    const env = { ...ENV, MOCK_LLM: undefined, NEARAI_API_KEY: "sk-test-replay", CODEHASH: "cd".repeat(32), NEAR_RPC: "https://rpc.testnet.near.org", VAULT_ACCOUNT: "v.testnet", AGENT_ACCOUNT: "a.testnet", MEMPOOL_BASE: "https://mempool.space/testnet4/api", BASE_RPC: "https://sepolia.base.org" };
-    let judged = 0;
-    const f = (async (url: string, init: RequestInit) => {
-      if (!url.startsWith("https://cloud-api.near.ai/")) return s.t.fetch(new URL(url).pathname, init);
-      judged++;
-      // 500 * 0.04 + 100000 * 1.35 = 135,020 micro-USD a call
-      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ risk: 90, technique: "override", reason: "fake" }) }, finish_reason: "stop" }], usage: { prompt_tokens: 500, completion_tokens: 100_000 } }));
-    }) as unknown as typeof fetch;
+  test("stops at half of today's arena pool, leaving the rest for tier 3, and exits 0", async () => {
+    await insert(1);
+    await insert(2);
+    await s.post("counter_add", { key: `fw:arena:${today()}`, n: 1499 }); // one under half
+    const fake = judge();
     const l = lines();
-    expect(await replay(["--max-usd", "0.2"], env, { fetch: f, log: l.log })).toBe(0);
-    expect(judged).toBe(2); // A blocks rows 1 and 2; before row 3 the limit is reached
+    expect(await replay(["--max-usd", "1"], ENV, { fetch: convex(), log: l.log, judge: fake.j })).toBe(0);
+    expect(fake.calls.length).toBe(2); // row 1 (A and B) brings the pool to 1501; row 2 is not started
+    expect((await s.dump()).replays.map(r => r.attempt_id)).toEqual([idN(1)]);
+    expect(l.text()).toContain("half of today's arena pool");
+  });
+
+  test("a pool already past half: no judge call at all", async () => {
+    await insert(1);
+    await s.post("counter_add", { key: `fw:arena:${today()}`, n: 3000 });
+    const fake = judge();
+    expect(await replay(["--max-usd", "1"], ENV, { fetch: convex(), log: () => {}, judge: fake.j })).toBe(0);
+    expect(fake.calls).toEqual([]);
+  });
+});
+
+describe("replay with the real judge client and a fake NEAR AI", () => {
+  const env = { ...ENV, MOCK_LLM: undefined, NEARAI_API_KEY: "sk-test-replay", CODEHASH: "cd".repeat(32), NEAR_RPC: "https://rpc.testnet.near.org", VAULT_ACCOUNT: "v.testnet", AGENT_ACCOUNT: "a.testnet", MEMPOOL_BASE: "https://mempool.space/testnet4/api", BASE_RPC: "https://sepolia.base.org" };
+  // 500 * 0.04 + 100000 * 1.35 = 135,020 micro-USD a call
+  const nearai = (risk: number) => {
+    const n = { judged: 0 };
+    const fetch = (async (url: string, init: RequestInit) => {
+      if (!url.startsWith("https://cloud-api.near.ai/")) return s.t.fetch(new URL(url).pathname, init);
+      n.judged++;
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ risk, technique: risk > 50 ? "override" : "none", reason: "fake" }) }, finish_reason: "stop" }], usage: { prompt_tokens: 500, completion_tokens: 100_000 } }));
+    }) as unknown as typeof globalThis.fetch;
+    return { n, fetch };
+  };
+  const spentToday = async () => (await s.dump()).counters.find(c => c.key === `nearai:spend:${today()}`)?.value ?? 0;
+
+  test("stops once this run's spend reaches --max-usd, and the spend lands on the agent's daily count", async () => {
+    for (const n of [1, 2, 3]) await insert(n);
+    await s.post("counter_add", { key: `nearai:spend:${today()}`, n: 1_000_000 }); // the agent spent $1 today: not this run's
+    const ai = nearai(90);
+    const l = lines();
+    expect(await replay(["--max-usd", "0.2"], env, { fetch: ai.fetch, log: l.log })).toBe(0);
+    expect(ai.n.judged).toBe(2); // A blocks rows 1 and 2; before row 3 the limit is reached
     expect((await s.dump()).replays.length).toBe(2);
+    expect(await spentToday()).toBe(1_000_000 + 270_040);
     expect(l.text()).toContain("stopping: estimated spend reached --max-usd 0.2");
-    expect(l.text()).toContain("estimated spend $0.270040");
+    expect(l.text()).toContain("estimated spend this run $0.270040");
     expect(l.text()).not.toContain("sk-test-replay");
   });
 
-  test("an exhausted arena pool stops the run", async () => {
+  test("the limit is checked before every judge call, not once per row", async () => {
     await insert(1);
-    const day = new Date().toISOString().slice(0, 10);
-    await s.post("counter_add", { key: `fw:arena:${day}`, n: 3000 });
-    const fake = judge();
+    const ai = nearai(5); // A allows, so B would follow
+    expect(await replay(["--max-usd", "0.1"], env, { fetch: ai.fetch, log: () => {} })).toBe(0);
+    expect(ai.n.judged).toBe(1); // A spent 0.135; B is not called
+    expect((await s.dump()).replays).toEqual([]); // no verdict without B
+  });
+
+  test("the agent's NEARAI_DAILY_USD cap stops replay too", async () => {
+    await insert(1);
+    await s.post("counter_add", { key: `nearai:spend:${today()}`, n: 4_999_900 }); // $5 default cap, nearly reached by the agent
+    const ai = nearai(90);
     const l = lines();
-    expect(await replay(["--max-usd", "1"], ENV, { fetch: convex(), log: l.log, judge: fake.j })).toBe(1);
-    expect(fake.calls).toEqual([]);
-    expect(l.text()).toContain("arena budget");
+    expect(await replay(["--max-usd", "1"], env, { fetch: ai.fetch, log: l.log })).toBe(0);
+    expect(ai.n.judged).toBe(0);
+    expect((await s.dump()).replays).toEqual([]);
+    expect(l.text()).toContain("NEARAI_DAILY_USD");
   });
 });

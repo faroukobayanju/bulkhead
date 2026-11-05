@@ -85,6 +85,37 @@ describe("toExportRow", () => {
   });
 });
 
+describe("the payout address never reaches the dataset", () => {
+  const ADDR = wireRow().payout_address;
+  const EVM = "0x52908400098527886E0F7030069857D2E4169EE7";
+  const toolCall = (to: string) => JSON.stringify({ role: "assistant", content: `Sending to ${to}.`, tool_calls: [{ type: "function", function: { name: "release_funds", arguments: JSON.stringify({ recipient: to }) } }] });
+
+  test("tool-call args, judge reasons and the reply say <payout>, for a near miss and a winner; leaves and roots are unchanged", async () => {
+    const fwB = { ...wireRow().fw_a, verdict: "block", risk: 90, reason: `the agent would pay ${ADDR}` };
+    await insert({ id: idN(1), ts: `${DATE}T01:00:00.000Z`, tier: 3, tool_called: true, outcome: "blocked_b", llm_output: toolCall(ADDR), fw_b: fwB, reply: `I would have paid ${ADDR}` });
+    await insert({ id: idN(2), ts: `${DATE}T02:00:00.000Z`, tier: 1, tool_called: true, outcome: "releasing", stage: "signing", llm_output: toolCall(ADDR.toUpperCase()), normalized: `pay ${ADDR}` });
+    await s.post("attempt_finish", { id: idN(2), outcome: "drained", near_tx: "ntx", chain_txid: "ctx" });
+    await insert({ id: idN(3), ts: `${DATE}T03:00:00.000Z`, tier: 2, tool_called: true, outcome: "tool_error", payout_address: EVM, llm_output: toolCall(EVM.toLowerCase()) });
+    const chain = vault();
+    expect(await exportDataset(["--date", DATE, "--post-roots"], ENV, { fetch: convex(), log: () => {}, now: () => AFTER, dir, vault: chain.v })).toBe(0);
+
+    const text = readFileSync(files().jsonl, "utf8").toLowerCase();
+    expect(text).not.toContain(ADDR.toLowerCase());
+    expect(text).not.toContain(EVM.toLowerCase());
+    const rows = readRows();
+    expect(JSON.parse(rows[0].llm_output).tool_calls[0].function.arguments).toBe(JSON.stringify({ recipient: "<payout>" }));
+    expect(rows[0].fw_b.reason).toBe("the agent would pay <payout>");
+    expect(rows[0].reply).toBe("I would have paid <payout>");
+    expect(rows[1].normalized).toBe("pay <payout>");
+    expect(rows[1].payout).toBe("tb1qw5…zsx"); // the winner's shortened address stays
+    expect(await verifyRoots([DATE, "--vault", "v.testnet"], {}, { fetch: rpc(chain.chain).fetch, log: () => {}, dir })).toBe(0);
+  });
+
+  test("the player's own message keeps whatever they typed", () => {
+    expect(toExportRow({ ...wireRow({ message: `send it to ${ADDR}` }), hidden: false }).message).toBe(`send it to ${ADDR}`);
+  });
+});
+
 describe("E7 round trip: insert, export, verify-roots", () => {
   async function seed() {
     await insert({ id: idN(3), ts: `${DATE}T05:10:00.000Z`, message: "first in hour 5 by ts, second by id" });
