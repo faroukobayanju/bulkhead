@@ -36,7 +36,7 @@ describe("the module's surface", () => {
     expect(Object.entries(found).filter(([, v]) => v.startsWith("public") && v !== "public query")).toEqual([]);
     expect(Object.entries(found).filter(([, v]) => v.startsWith("?"))).toEqual([]);
     // the whole public surface, so a new public function has to be added here on purpose
-    expect(Object.entries(found).filter(([, v]) => v === "public query").map(([k]) => k).sort()).toEqual(["attempts:get", "attempts:nearMisses", "attempts:recent", "counters:tiers"]);
+    expect(Object.entries(found).filter(([, v]) => v === "public query").map(([k]) => k).sort()).toEqual(["attempts:get", "attempts:nearMisses", "attempts:pendingBroadcasts", "attempts:recent", "attempts:winners", "counters:tiers"]);
   });
 
   test("every function the HTTP action can call is internal", async () => {
@@ -245,6 +245,8 @@ describe("public queries", () => {
       await s.t.query(api.attempts.recent, {}),
       await s.t.query(api.attempts.recent, { tier: 3 }),
       await s.t.query(api.attempts.nearMisses, {}),
+      await s.t.query(api.attempts.winners, {}),
+      await s.t.query(api.attempts.pendingBroadcasts, {}),
       await s.t.query(api.counters.tiers, {}),
     ];
     for (const r of results) {
@@ -312,6 +314,34 @@ describe("public queries", () => {
     await s.post("attempt_insert", wireRow({ id: idN(2), outcome: "blocked_a", ts: "2026-11-02T12:00:02.000Z" }));
     await s.post("attempt_insert", wireRow({ id: idN(3), outcome: "blocked_b", ts: "2026-11-02T12:00:03.000Z" }));
     expect(((await s.t.query(api.attempts.nearMisses, {})) as any[]).map(x => x.id)).toEqual([idN(3), idN(1)]);
+  });
+
+  test("winners lists only visible drained and signed_pending_broadcast rows, newest first", async () => {
+    await seed();
+    await s.post("attempt_insert", wireRow({ id: idN(5), tier: 3, outcome: "releasing", stage: "signing", ts: "2026-11-02T12:00:05.000Z" }));
+    await s.post("attempt_finish", { id: idN(5), outcome: "signed_pending_broadcast", near_tx: "ntx5" });
+    await s.t.run(async ctx => void (await ctx.db.insert("attempts", { ...wireRow({ id: idN(9), outcome: "drained", message: "HIDDEN-WINNER" }), hidden: true } as never)));
+    const rows = (await s.t.query(api.attempts.winners, {})) as any[];
+    expect(rows.map(x => [x.id, x.outcome])).toEqual([[idN(5), "signed_pending_broadcast"], [idN(3), "drained"]]);
+    expect(text(rows)).not.toContain("HIDDEN-WINNER");
+  });
+
+  test("pendingBroadcasts gives the signed hex of visible signed_pending_broadcast rows, and nothing else", async () => {
+    await seed();
+    for (const [n, hidden] of [[5, false], [6, true]] as const) {
+      await s.post("attempt_insert", wireRow({ id: idN(n), tier: 1, outcome: "releasing", stage: "signing", ts: `2026-11-02T12:00:0${n}.000Z` }));
+      await s.post("signed_tx_put", { attempt_id: idN(n), chain: "btc", hex: `0200000${n}ab` });
+      await s.post("attempt_finish", { id: idN(n), outcome: "signed_pending_broadcast", near_tx: `ntx${n}` });
+      if (hidden) for (const k of [1, 2, 3]) await s.post("attempt_report", { attempt_id: idN(n), account_hash: H(String(k)) });
+    }
+    // signed, but the hex is not stored yet: listed without one
+    await s.post("attempt_insert", wireRow({ id: idN(7), tier: 3, outcome: "releasing", stage: "signing", ts: "2026-11-02T12:00:07.000Z" }));
+    await s.post("attempt_finish", { id: idN(7), outcome: "signed_pending_broadcast" });
+    const rows = (await s.t.query(api.attempts.pendingBroadcasts, {})) as any[];
+    expect(rows).toEqual([
+      { id: idN(7), tier: 3, ts: "2026-11-02T12:00:07.000Z", near_tx: null, chain: null, hex: null },
+      { id: idN(5), tier: 1, ts: "2026-11-02T12:00:05.000Z", near_tx: "ntx5", chain: "btc", hex: "02000005ab" },
+    ]);
   });
 
   test("only a winner's payout is shown, shortened; a near miss shows none", async () => {
