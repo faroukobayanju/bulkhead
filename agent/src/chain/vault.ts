@@ -340,6 +340,21 @@ export function makeVault(o: VaultOpts) {
     throw new Error("release tx unknown but not expired: outcome unknown");
   }
 
+  // release_funds with a payload the caller built, skipping every local check (cap, coins, fees). Only the attack demo uses it, to
+  // show the contract's own refusals. A panic is a ContractRefusedError and no release_signed event (the MPC refused) is a
+  // SignFailedError, as in release(). Returns the NEAR tx hash.
+  async function releaseWith(tier: TierId, attemptId: string, recipient: string, payload: unknown): Promise<string> {
+    const hash = await send("release_funds", { tier_id: tier, attempt_id: attemptId, recipient, payload }, RELEASE_GAS);
+    const r = await waitFinal(hash);
+    const fail = r.status?.Failure;
+    if (fail) {
+      const m = JSON.stringify(fail).match(/Smart contract panicked: (ERR_[A-Z0-9_]+)/);
+      throw m ? new ContractRefusedError(m[1]!) : new Error("release_funds failed on-chain");
+    }
+    if (!events(r).some(e => e.event === "release_signed" && e.data?.attempt_id === attemptId)) throw new SignFailedError();
+    return hash;
+  }
+
   // E22: only a FullAccess key may log in as the account. An RPC failure throws; false means the RPC said the key is not there
   // or is a FunctionCall key.
   // ponytail: kept for tests and tools; the server's login check is accesskey.ts
@@ -366,6 +381,7 @@ export function makeVault(o: VaultOpts) {
 
   return {
     release,
+    releaseWith,
     tierOpen,
     wasSigned,
     viewAccessKey,
@@ -389,12 +405,16 @@ type ChainDb = {
   listPayouts(drainedSince: string): Promise<PayoutRow[]>;
   counter: Counter;
 };
+// A Signer from an "ed25519:..." secret key string (the testnet AGENT_PRIVATE_KEY).
+export function keySigner(key: string): Signer {
+  const kp = KeyPair.fromString(key as never);
+  return { publicKey: kp.getPublicKey().toString(), sign: async (m: Uint8Array) => kp.sign(m).signature };
+}
 const DRAINED_LOOKBACK_MS = 24 * 3600_000; // a drained payout's coin and nonce are excluded for a day, by which time it has confirmed
 
 export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier, attemptId: string) => void; fetch?: typeof fetch; signer?: Signer; clock?: () => number; warn?: (what: string, id: string, e: unknown) => void }) {
   const f = x.fetch ?? fetch;
-  const kp = cfg.agentPrivateKey ? KeyPair.fromString(cfg.agentPrivateKey as never) : null;
-  const signer = x.signer ?? (kp ? { publicKey: kp.getPublicKey().toString(), sign: async (m: Uint8Array) => kp.sign(m).signature } : null);
+  const signer = x.signer ?? (cfg.agentPrivateKey ? keySigner(cfg.agentPrivateKey) : null);
   if (!signer) throw new Error("no agent signing key");
   const clock = x.clock ?? Date.now;
   const btc = makeBtc({ fetch: f, base: cfg.mempoolBase });

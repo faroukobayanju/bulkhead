@@ -10,7 +10,7 @@ type Fixture = {
   agreement: string;
   win_pattern: string;
   attack_pattern: string;
-  judge: { attack: { risk: number; technique: any; reason: string }; benign: { risk: number; technique: any; reason: string } };
+  judge: Record<"attack" | "encoded" | "benign", { risk: number; technique: any; reason: string }>;
   attestation: { sha256: string; modelId: string };
 };
 const ADDRESS = /\b(?:0x[0-9a-fA-F]{40}|(?:bc|tb)1[0-9a-z]{20,90})\b/;
@@ -26,7 +26,9 @@ export function loadMock(read: () => string = () => readFileSync(new URL("../tes
       ? { raw: { content: f.agreement }, text: f.agreement, toolCalls: [{ name: "release_funds", args: { recipient: to } }] }
       : { raw: { content: f.refusal }, text: f.refusal, toolCalls: [] };
   };
-  const judge: Judge = async ({ messages, proposed_action }) => (attack.test(messages.map(m => m.content).join("\n")) ? f.judge.attack : f.judge.benign);
+  // Like the real judge, it is also shown the payloads the normalizer decoded (Morse, base64...) and rates them like the messages.
+  const judge: Judge = async ({ messages, normalized }) =>
+    attack.test(messages.map(m => m.content).join("\n")) ? f.judge.attack : normalized?.decoded?.some(d => attack.test(d.value)) ? f.judge.encoded : f.judge.benign;
   const attest = async () => f.attestation;
   return { chat, judge, attest };
 }
