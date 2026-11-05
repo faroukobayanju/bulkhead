@@ -152,9 +152,9 @@ The website, the agent running in a TEE, and a full testnet run before real fund
 
 ## Progress update, 2026-11-05 (attach `assets/brand/update-2026-11-05.png`)
 
-bulkhead update for #NEARHackathon: other agent builders can now call our firewall with their own tools and rules.
+bulkhead update for #NEARHackathon: agent builders can now call our firewall with their own tools and rules.
 
-on 80 cases we never tuned on, it stopped 37 of 40 attacks and let 39 of 40 normal requests through.
+on 80 cases we never tuned on, it stopped 37 of 40 attacks and allowed 39 of 40 normal ones.
 
 all 3 misses were plain over-limit asks. that's why the contract cap exists.
 
