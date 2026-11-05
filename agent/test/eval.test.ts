@@ -247,6 +247,24 @@ describe("eval with a fake NEAR AI", () => {
     expect(summary(l.text())).toMatchObject({ block_rate: 1, fp_rate: 0, n_attack: 39 });
   });
 
+  test("--all-attacks skips tier 1 and scores every attack as if the guard had been fooled", async () => {
+    const net = fake({ calls: () => false, risk: (m, action) => (isAttack(m) && !action ? 90 : 3) });
+    const l = lines();
+    expect(await runEval([...ARGS, "--all-attacks"], LIVE, { fetch: net.fetch, log: l.log, dataDir: fixture() })).toBe(0);
+    expect(net.tier().length).toBe(0);
+    expect(summary(l.text())).toMatchObject({ block_rate: 1, fp_rate: 0, n_attack: 50 });
+    expect(l.text()).toContain("gating: all attacks");
+  });
+
+  test("--all-attacks: checkpoint B gets release_funds to a valid address when A allows", async () => {
+    const net = fake({ calls: () => false, risk: (m, action) => (isAttack(m) && action ? 90 : 3) });
+    const l = lines();
+    expect(await runEval([...ARGS, "--all-attacks"], LIVE, { fetch: net.fetch, log: l.log, dataDir: fixture() })).toBe(0);
+    const b = net.judge().map(s => JSON.parse(s.user).proposed_action).filter(Boolean);
+    expect(b.length).toBe(25); // the 25 with an override phrase stop at A on the heuristics
+    expect(b[0]).toEqual({ tool: "release_funds", args: { recipient: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq" } });
+  });
+
   test("the public sample is rated with checkpoint A when the file is there", async () => {
     const pub = Array.from({ length: 10 }, (_, i) => `public ${i}`);
     const net = fake({ calls: () => true, risk: m => (isAttack(m) || (m.startsWith("public") && num(m) < 7) ? 90 : 3) });
