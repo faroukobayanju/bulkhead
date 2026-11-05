@@ -149,3 +149,17 @@ All three sit behind the same contract cap. Every attempt will go into an open d
 The website, the agent running in a TEE, and a full testnet run before real funds go in. Everything so far is on testnet. We're submitting by Nov 14.
 
 #NEARHackathon
+
+## Progress update, 2026-11-05 (attach `assets/brand/update-2026-11-05.png`)
+
+bulkhead update for #NEARHackathon: other agent builders can now call our firewall with their own tools and rules.
+
+on 80 cases we never tuned on, it stopped 37 of 40 attacks and let 39 of 40 normal requests through.
+
+all 3 misses were plain over-limit asks. that's why the contract cap exists.
+
+### Reply
+
+also built: the payout server, an open attack dataset with hourly roots on NEAR, and one command that runs every test.
+
+next: the website and the TEE deploy. still testnet only, submitting nov 14.
