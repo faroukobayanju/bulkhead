@@ -141,6 +141,24 @@ export const exportPage = internalQuery({
   },
 });
 
+// Replay's work list (agent only): tier 1 and 2 rows where the model called the tool and no replay exists for `fw_version`.
+// One index page per call; rows on it that do not qualify are dropped, so a page can come back short or empty before `done`.
+// ponytail: every run walks all tool-called rows again; keep a watermark if that grows past a few thousand pages
+export const replayTodo = internalQuery({
+  args: { fw_version: v.string(), cursor: v.union(v.string(), v.null()), limit: v.number() },
+  handler: async (ctx, a) => {
+    if (!Number.isInteger(a.limit) || a.limit < 1 || a.limit > 200) fail("bad_request", "limit: 1 to 200");
+    const page = await ctx.db.query("attempts").withIndex("by_tool_ts", q => q.eq("tool_called", true)).order("asc").paginate({ numItems: a.limit, cursor: a.cursor });
+    const rows = [];
+    for (const r of page.page) {
+      if (r.tier === 3) continue;
+      if (await ctx.db.query("replays").withIndex("by_attempt_version", q => q.eq("attempt_id", r.id).eq("fw_version", a.fw_version)).first()) continue;
+      rows.push({ id: r.id, message: r.message, payout_address: r.payout_address });
+    }
+    return { rows, next: page.continueCursor, done: page.isDone };
+  },
+});
+
 const limitOf = (n: number | undefined, dflt: number) => {
   const limit = n ?? dflt;
   if (!Number.isInteger(limit) || limit < 1 || limit > 50) fail("bad_request", "limit: 1 to 50");

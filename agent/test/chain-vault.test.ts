@@ -63,7 +63,7 @@ function near(o: Partial<Near> = {}) {
     const p = req.params;
     if (req.method === "query" && p.request_type === "call_function") {
       const args = JSON.parse(Buffer.from(p.args_base64, "base64").toString());
-      const out = p.method_name === "get_tier" ? n.tier : p.method_name === "get_pending_tx" ? (n.pending[args.id] ?? null) : p.method_name === "derived_public_key" ? TEST_DERIVED : undefined;
+      const out = p.method_name === "get_tier" ? n.tier : p.method_name === "get_pending_tx" ? (n.pending[args.id] ?? null) : p.method_name === "derived_public_key" ? TEST_DERIVED : p.method_name === "get_roots" ? [[args.day % 24, "ab".repeat(32)]] : undefined;
       if (out === undefined) return reply({ error: { name: "HANDLER_ERROR", cause: { name: "UNKNOWN_METHOD" } } });
       return reply({ result: [...Buffer.from(JSON.stringify(out))], logs: [], block_height: 1 });
     }
@@ -502,6 +502,13 @@ describe("logAttemptRoots", () => {
   test("an on-chain failure throws", async () => {
     const r = rig({ tx: () => failure("Smart contract panicked: ERR_ROOTS_EXIST") });
     await expect(r.vault.logAttemptRoots(1, [])).rejects.toThrow();
+  });
+  test("getRoots reads the get_roots view for the day", async () => {
+    const r = rig();
+    expect(await r.vault.getRoots(20_759)).toEqual([[20_759 % 24, "ab".repeat(32)]]);
+    const q = r.calls.find(c => c.params.method_name === "get_roots")!;
+    expect(q.params.account_id).toBe(VAULT);
+    expect(JSON.parse(Buffer.from(q.params.args_base64, "base64").toString())).toEqual({ day: 20_759 });
   });
   test("two sends in a row use increasing nonces", async () => {
     const r = rig({ tx: () => txResult([]) });
