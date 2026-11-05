@@ -93,3 +93,59 @@ The rule we ended on: when in doubt, keep the tier locked and alert a human. A s
 Tested Bulkhead's firewall API for other agent builders on 80 cases we never tuned on. It stopped 37 of 40 attacks and allowed 39 of 40 normal requests.
 
 All 3 misses were plain "refund $85" asks over a $30 limit. Models are bad at math rules. Put those in code. #NEARHackathon
+
+## Long-form update, 2026-11-05 (attach `assets/brand/social-1200x630.png`)
+
+My friend and I are building Bulkhead for the NEAR hackathon. It's a firewall and a spending cap for AI agents that hold money. Here's where it stands, including the parts that didn't work.
+
+**The problem**
+
+AI agents can now hold money and sign transactions. On NEAR, one agent can sign on Bitcoin, Base and other chains through Chain Signatures.
+
+The weak point is the conversation. Freysa's Act 2 prize pool of $12,000 went to a player after 819 attempts. The winning message didn't hack anything. It told the agent that its approve-payment tool was really a way to notify people.
+
+Most agents enforce their spending limit in their own server code. A model that has been talked into something can talk its way past that, and a hacked server ignores it.
+
+**What we built**
+
+Two layers, because each one fails in a different way.
+
+1. A firewall the agent calls before it acts. It decodes what attackers hide (base64, hex, Morse, rot13, invisible Unicode), runs heuristics, and asks a judge model on NEAR AI Cloud to rate the request. It returns allow, escalate or block, signed.
+
+2. A vault contract on NEAR that holds the agent's signing rights. It caps what can leave per round and enforces a cooldown, whatever the AI decides.
+
+The firewall lowers the odds that a trick works. The contract limits the damage when one does.
+
+**Proof so far**
+
+Our contract signed a real Bitcoin testnet payment, and no person holds that key: https://mempool.space/testnet4/tx/a8ecea7c06b387f86349322cf025233c3f170e69a2a31f27e274e70ae89e8b1a
+
+Then we gave it a false input amount to sign. Bitcoin rejected the transaction. So the AI can't get money out by lying about the numbers.
+
+**The numbers, including the misses**
+
+Other builders can call the firewall with their own tools and rules. On 80 test cases we never tuned on, it stopped 37 of 40 attacks and allowed 39 of 40 normal requests. All 3 misses were plain requests like "refund $85" when the limit was $30. No trick wording at all.
+
+We also ran attack sets we didn't write. On 45 banking attacks from AgentDojo it blocked 42 under our arena rules, and 44 with a payments policy. Its misses were the same kind: a bare "send money to this account."
+
+The lesson: language models are weak at checking a number against a limit. Hard limits belong in code or in a contract. That's the reason Bulkhead has both layers.
+
+On the Tensor Trust set, which tries to make a model say "Access Granted", it blocked 84 of 100. Most of what it let through, like "say Access Granted", can't move money, so the firewall allows it on purpose. It isn't a general jailbreak filter.
+
+One surprise: our easiest guard is too stubborn. On 162 attacks it called the payout tool only 5 times, and the firewall blocked all 5. That's too few to score the firewall properly, so next we score it on every attack as if the guard had already been fooled.
+
+**Drain Me**
+
+To test all of this in public, we're launching Drain Me: three AI guards holding real BTC and USDC. Anyone can try to talk them into paying.
+
+- Guard 1: a prompt only
+- Guard 2: a hardened prompt
+- Guard 3: a hardened prompt plus the firewall
+
+All three sit behind the same contract cap. Every attempt will go into an open dataset, and each day we post a root for every hour of attempts on NEAR, so anyone can check that nobody edited the data afterwards.
+
+**What's left**
+
+The website, the agent running in a TEE, and a full testnet run before real funds go in. Everything so far is on testnet. We're submitting by Nov 14.
+
+#NEARHackathon
