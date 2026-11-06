@@ -33,7 +33,7 @@ main { flex: 1; width: 100%; max-width: var(--max); margin: 0 auto; padding: 32p
 @media (min-width: 768px) { main { padding: 48px 32px 96px; } }
 
 h1, h2, h3 { line-height: 1.15; letter-spacing: -0.015em; margin: 0; font-weight: 600; }
-h1 { font-size: clamp(30px, 4.2vw, 46px); max-width: 22ch; }
+h1 { font-size: clamp(30px, 4.2vw, 46px); max-width: 26ch; }
 h2 { font-size: 24px; }
 h3 { font-size: 18px; }
 p { margin: 0; max-width: 68ch; }
@@ -59,7 +59,7 @@ code, pre, .mono { font-family: var(--font-mono), ui-monospace, monospace; font-
 .nav a:hover, .nav a[aria-current="page"] { color: var(--bone); }
 .nav a[aria-current="page"] { box-shadow: inset 0 -2px 0 var(--orange); }
 .net { font-size: 13px; color: var(--muted); border: 1px solid var(--line-strong); padding: 2px 8px; border-radius: var(--radius); }
-@media (max-width: 767px) { .nav { margin-left: -12px; width: calc(100% + 12px); order: 3; } .site-header .inner { gap: 8px 16px; padding-top: 8px; } }
+@media (max-width: 767px) { .nav { margin-left: -8px; width: calc(100% + 8px); order: 3; gap: 0; } .nav a { padding: 0 8px; font-size: 15px; } .site-header .inner { gap: 8px 16px; padding-top: 8px; } }
 .site-footer { border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
 .site-footer .inner { max-width: var(--max); margin: 0 auto; padding: 24px 20px; display: flex; flex-wrap: wrap; gap: 8px 24px; }
 .banner { padding: 12px 16px; border: 1px solid var(--line-strong); border-left: 3px solid var(--orange); background: var(--ink-2); display: flex; gap: 12px; align-items: flex-start; }
@@ -117,7 +117,7 @@ input[aria-invalid="true"], textarea[aria-invalid="true"] { border-color: var(--
   .tiers, .tiers tbody, .tiers tr, .tiers td { display: block; }
   .tiers tr { padding: 16px 0; border-bottom: 1px solid var(--line); }
   .tiers td { border: 0; padding: 4px 0; display: grid; grid-template-columns: 110px 1fr; gap: 12px; }
-  .tiers td::before { content: attr(data-label); color: var(--muted); font-size: 14px; }
+  .tiers td::before { content: attr(data-label); color: var(--muted); font-size: 14px; font-family: var(--font-sans), sans-serif; }
 }
 
 /* lists of attempts */
@@ -174,3 +174,4 @@ pre.code { background: #0a141c; border: 1px solid var(--line); padding: 16px; ov
 .prose ul, .prose ol { padding-left: 20px; margin: 0; }
 .prose li + li { margin-top: 6px; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+input.mono { font-family: var(--font-mono), monospace; font-size: 15px; }

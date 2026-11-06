@@ -1,6 +1,6 @@
 // One row per claim, each with an icon, a word and the raw value. "Verified" is used only for what the agent's /attestation
 // lists under verification.verified; everything under not_verified is labelled so.
-import { CheckCircle, MinusCircle, Warning, XCircle } from "@phosphor-icons/react/ssr";
+import { CheckCircle, Info, MinusCircle, Warning, XCircle } from "@phosphor-icons/react/ssr";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CopyButton, DownloadJson } from "@/components/CopyDownload";
@@ -23,9 +23,10 @@ type Attestation = {
   mock: boolean;
   verification: { verified: string[]; not_verified: string[] };
 };
-type Tone = "ok" | "bad" | "none" | "warn";
-const ICON = { ok: CheckCircle, bad: XCircle, none: MinusCircle, warn: Warning };
-const WORD = { ok: "Passes", bad: "Fails", none: "Not checked", warn: "Warning" };
+// ok: a check this page ran and passed. info: a value reported by the agent or the contract, shown so you can compare it.
+type Tone = "ok" | "bad" | "none" | "warn" | "info";
+const ICON = { ok: CheckCircle, bad: XCircle, none: MinusCircle, warn: Warning, info: Info };
+const WORD = { ok: "Passes", bad: "Fails", none: "Not checked", warn: "Partly checked", info: "Reported" };
 
 async function attestation(): Promise<Attestation | null> {
   try {
@@ -48,7 +49,7 @@ function Row({ tone, title, children, raw, testId }: { tone: Tone; title: string
   const I = ICON[tone];
   return (
     <li>
-      <I size={20} weight="bold" aria-label={WORD[tone]} className={tone === "ok" ? "ok" : tone === "bad" ? "bad" : tone === "warn" ? "warn" : "muted"} />
+      <I size={20} weight="bold" aria-label={WORD[tone]} className={tone === "ok" ? "ok" : tone === "bad" ? "bad" : tone === "warn" ? "warn" : tone === "info" ? "" : "muted"} />
       <div className="stack" style={{ gap: 6 }}>
         <h3>{title}</h3>
         <div className="small" data-testid={testId}>
@@ -108,7 +109,7 @@ export default async function VerifyPage() {
         <Row tone={digestMatch === true ? "ok" : digestMatch === false ? "bad" : "none"} title="Running codehash equals the published image digest" raw={digest ?? undefined}>
           {digest === null ? "No image digest is published yet." : digestMatch ? "Match" : "Mismatch"}
         </Row>
-        <Row tone={!att ? "none" : att.mock ? "warn" : "ok"} title="NEAR AI model attestation" raw={att?.verification}>
+        <Row tone={!att ? "none" : att.mock || att.verification.not_verified.length ? "warn" : "ok"} title="NEAR AI model attestation" raw={att?.verification}>
           {!att ? (
             "The agent cannot be reached, so its attestation is not shown."
           ) : att.mock ? (
@@ -138,7 +139,7 @@ export default async function VerifyPage() {
             </>
           )}
         </Row>
-        <Row tone={att ? "ok" : "none"} title="System prompt sha256 per tier" raw={att?.prompt_sha256}>
+        <Row tone={att ? "info" : "none"} title="System prompt sha256 per tier" raw={att?.prompt_sha256}>
           {att ? (
             <dl className="facts">
               {Object.entries(att.prompt_sha256).map(([t, h]) => (
@@ -152,7 +153,7 @@ export default async function VerifyPage() {
             "Unavailable."
           )}
         </Row>
-        <Row tone={att ? "ok" : "none"} title="Models, firewall version and config" raw={att ? { models: att.models, judge_model: att.judge_model, firewall_version: att.firewall_version, config_sha256: att.checksum } : undefined}>
+        <Row tone={att ? "info" : "none"} title="Models, firewall version and config" raw={att ? { models: att.models, judge_model: att.judge_model, firewall_version: att.firewall_version, config_sha256: att.checksum } : undefined}>
           {att ? (
             <>
               Firewall <span className="mono">{att.firewall_version}</span>, judge <span className="mono">{att.judge_model}</span>, config sha256 <span className="mono">{att.checksum.slice(0, 16)}…</span>
@@ -161,7 +162,7 @@ export default async function VerifyPage() {
             "Unavailable."
           )}
         </Row>
-        <Row tone={cfg ? "ok" : "none"} title="Cap and cooldown, read from the contract" raw={arena.tiers.map(t => ({ tier: t.id, max_release: t.maxRelease, rounds_left: t.roundsLeft, cooldown_s: t.cooldownS }))}>
+        <Row tone={cfg ? "info" : "none"} title="Cap and cooldown, read from the contract" raw={arena.tiers.map(t => ({ tier: t.id, max_release: t.maxRelease, rounds_left: t.roundsLeft, cooldown_s: t.cooldownS }))}>
           <ul className="labels">
             {arena.tiers.map(t => (
               <li key={t.id}>

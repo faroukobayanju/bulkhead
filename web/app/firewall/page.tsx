@@ -6,7 +6,7 @@ export const metadata = { title: "Firewall API" };
 
 function Code({ code, label }: { code: string; label: string }) {
   return (
-    <figure className="stack" style={{ margin: 0 }}>
+    <figure style={{ margin: 0, display: "grid", gap: 10 }}>
       <figcaption className="row" style={{ justifyContent: "space-between" }}>
         <span className="muted small">{label}</span>
         <CopyButton text={code} />
@@ -34,14 +34,14 @@ export default function FirewallPage() {
       <header className="stack">
         <h1>A firewall call before your agent acts</h1>
         <p className="muted">
-          <span className="mono">POST /v1/check</span> rates a conversation and the action your agent is about to take, and answers allow, escalate or block. Every answer is signed by the agent key registered in the vault contract.
+          <span className="mono">POST /v1/check</span> rates a conversation and the action your agent is about to take, and answers allow, escalate or block. Every 200 answer is signed with the agent's ed25519 key.
         </p>
       </header>
 
       <section className="section" aria-labelledby="m-h">
         <div className="section-head">
           <h2 id="m-h">Measured</h2>
-          <p className="muted small">All single-turn. Each number links to the run that produced it.</p>
+          <p className="muted small">All single-turn. Each number links to its source.</p>
         </div>
         <div className="metrics">
           <div className="metric">

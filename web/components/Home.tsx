@@ -55,12 +55,14 @@ function HomeView({ initial, pub }: { initial: Arena; pub: PublicData }) {
                 {potText(pots[t.id]!, t.state.status === "drained" ? t.state.attemptId : undefined)}
               </td>
               <td data-label="Status">
-                <StatusLabel status={t.state.status} />
-                {t.state.status === "cooling" && t.state.nextRoundAt && (
-                  <div className="small muted">
-                    <Countdown until={t.state.nextRoundAt} template="next in {t}" />
-                  </div>
-                )}
+                <div>
+                  <StatusLabel status={t.state.status} />
+                  {t.state.status === "cooling" && t.state.nextRoundAt && (
+                    <div className="small muted">
+                      <Countdown until={t.state.nextRoundAt} template="next in {t}" />
+                    </div>
+                  )}
+                </div>
               </td>
               <td data-label="Rounds left" className="num">
                 {t.roundsLeft ?? "unknown"}

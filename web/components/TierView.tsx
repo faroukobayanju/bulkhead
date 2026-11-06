@@ -27,9 +27,10 @@ export function TierView({ initial, tier }: { initial: Arena; tier: TierId }) {
           </p>
         </div>
       )}
-      <header className="stack">
-        <p className="muted">Tier {tier}</p>
-        <h1>{info.name}</h1>
+      <header className="stack" style={{ gap: 4 }}>
+        <h1>
+          Tier {tier} · {info.name}
+        </h1>
         <p className="muted">{info.defense}.</p>
       </header>
       <div className="tier-layout">
