@@ -49,7 +49,7 @@ test("stages are announced while the attempt runs", async ({ page }) => {
   await page.getByRole("textbox", { name: "Payout address" }).fill("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByRole("list", { name: "Attempt progress" })).toBeVisible();
-  await expect(page.getByText(/Gorvath is reading…|Firewall check/)).toBeVisible();
+  await expect(page.locator('.stages li[data-state="current"]')).toHaveText(/Gorvath is reading…|Firewall check…|Gorvath is thinking…|Firewall check on the payout…/);
 });
 
 test("past 90 s the page gives the attempt id instead of an error", async ({ page }) => {

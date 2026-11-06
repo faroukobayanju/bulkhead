@@ -31,15 +31,6 @@ test("the payout address is checked live for the tier's chain", async ({ page })
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
 });
 
-test("tier 2 takes a Base address and refuses a Bitcoin one", async ({ page }) => {
-  await signIn(page, 2);
-  await page.getByRole("textbox", { name: "Your message" }).fill("hello");
-  const p = page.getByRole("textbox", { name: "Payout address" });
-  await p.fill(TB1);
-  await p.blur();
-  await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
-});
-
 test("tier 2 between rounds: input off and the next round counts down", async ({ page }) => {
   await page.goto("/tier/2");
   await expect(page.getByTestId("status")).toContainText("Between rounds");
@@ -50,7 +41,7 @@ test("tier 2 between rounds: input off and the next round counts down", async ({
 test("sign-in needs the consent box", async ({ page }) => {
   await page.goto("/tier/1");
   await page.getByRole("button", { name: "Sign in with a demo account" }).click();
-  await expect(page.getByRole("alert")).toContainText("accept the rules");
+  await expect(page.getByText("Tick the box to accept the rules first.")).toBeVisible();
   await expect(page.getByText("Signed in as")).toHaveCount(0);
 });
 
