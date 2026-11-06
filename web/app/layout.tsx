@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
 import Link from "next/link";
+import { ConvexRoot } from "@/components/Live";
 import { Nav } from "@/components/Nav";
 import { isMock, network } from "@/lib/arena";
 import "./globals.css";
@@ -32,7 +33,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <Nav />
           </div>
         </header>
-        <main id="main">{children}</main>
+        <main id="main">
+          <ConvexRoot>{children}</ConvexRoot>
+        </main>
         <footer className="site-footer">
           <div className="inner">
             <span>Drain Me is the live arena for Bulkhead.</span>
