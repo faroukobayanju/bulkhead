@@ -194,3 +194,30 @@ export const nearMisses = query({
     return rows.map(publicAttempt);
   },
 });
+
+// Paid rounds, for the "top attackers" panel: visible drained and signed_pending_broadcast rows, newest first.
+export const winners = query({
+  args: { limit: v.optional(v.number()) },
+  handler: async (ctx, a) => {
+    const limit = limitOf(a.limit, 10);
+    const take = (outcome: "drained" | "signed_pending_broadcast") => ctx.db.query("attempts").withIndex("by_hidden_outcome_ts", q => q.eq("hidden", false).eq("outcome", outcome)).order("desc").take(limit);
+    const rows = [...(await take("drained")), ...(await take("signed_pending_broadcast"))];
+    return rows.sort((x, y) => (x.ts < y.ts ? 1 : -1)).slice(0, limit).map(publicAttempt);
+  },
+});
+
+// For /verify: payouts the contract signed that are not broadcast yet, with the signed hex so anyone can broadcast it. The hex
+// pays the winner and nobody else, so it is safe to publish. Hidden rows are listed too: only id, tier, time and transactions come
+// back, never player text, and a hidden row's payout must still be broadcastable. hex is null until the agent has stored it.
+export const pendingBroadcasts = query({
+  args: {},
+  handler: async ctx => {
+    const rows = await ctx.db.query("attempts").withIndex("by_outcome_ts", q => q.eq("outcome", "signed_pending_broadcast")).order("desc").take(20);
+    return await Promise.all(
+      rows.map(async r => {
+        const tx = await ctx.db.query("signed_txs").withIndex("by_attempt", q => q.eq("attempt_id", r.id)).first();
+        return { id: r.id, tier: r.tier, ts: r.ts, near_tx: r.near_tx ?? null, chain: tx?.chain ?? null, hex: tx?.hex ?? null };
+      }),
+    );
+  },
+});

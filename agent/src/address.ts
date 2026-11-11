@@ -2,6 +2,7 @@
 // EIP-55 on Base. Player input and model output both go through here, so anything odd is refused rather than repaired.
 import { bech32, bech32m } from "@scure/base";
 import { getAddress, isAddress } from "viem";
+import { bytesToHex } from "@noble/hashes/utils";
 
 export type Chain = "btc" | "evm";
 export const CHAIN: Record<1 | 2 | 3, Chain> = { 1: "btc", 2: "evm", 3: "btc" };
@@ -10,7 +11,8 @@ export type Hrp = "bc" | "tb";
 // `address` is what goes to the contract. Two strings name the same payee exactly when their `key`s are equal.
 export type Payee = { address: string; key: string };
 
-const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
+// No Buffer: the web app runs this in browsers for live payout checks.
+const hex = bytesToHex;
 
 // ponytail: witness versions 0 (P2WPKH, P2WSH) and 1 (taproot) only. v2+ outputs are consensus-valid but non-standard, and a
 // payout the contract refuses is a release_failed, so they are refused here. Raise this if the contract ever accepts them.
