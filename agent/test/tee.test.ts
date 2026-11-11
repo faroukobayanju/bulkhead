@@ -4,7 +4,7 @@ import { KeyPair, transactions, utils } from "near-api-js";
 import { AGENT_METHODS } from "../../scripts/check-agent-key";
 import { makeChainDeps } from "../src/chain/vault";
 import type { Config } from "../src/config";
-import { bootTee, buildAttestation, reportData, startRenewal } from "../src/tee";
+import { bootTee, buildAttestation, measurementsOf, reportData, startRenewal } from "../src/tee";
 
 const fixture = JSON.parse(readFileSync(new URL("../../contracts/vault/tests/fixtures/s3-attestation.json", import.meta.url), "utf8"));
 const RPC = "https://rpc.test";
@@ -14,9 +14,23 @@ const hexOf = (pk: any) => Buffer.from(pk.ed25519Key.data).toString("hex");
 
 // One fake for the dstack socket, Phala's collateral API and the NEAR RPC. The NEAR side keeps the agent account's keys, so the
 // key list it answers is what the broadcast txs made of it.
+// The S3 CVM, as contracts/vault/src/lib.rs s3_measurements() has it.
+const S3 = {
+  rtmrs: {
+    mrtd: "7fe60787222bd394cb516abca2435f22f035ab2cc9c0a4b4b3b148e46297f3d931a237b72f359052c6e657d8c1409173",
+    rtmr0: "68102e7b524af310f7b7d426ce75481e36c40f5d513a9009c046e9d37e31551f0134d954b496a3357fd61d03f07ffe96",
+    rtmr1: "4ae609807c765916a31d724786ed74bcb97e168a9d937b04936aeef2015c907eba5ac352c6bcd749c246fd62ffb659ec",
+    rtmr2: "764489f277a8540189761e72b4238ba36d4d647e11bd958d8ab5522af2a4867b0ff63e06b0c4967f1857236244040a5d",
+  },
+  key_provider_event_digest: "1de9cfa982eab350c1c6719fed6f35f9be554d202c26d354e498b0b9e6ad2e6e1e02df3abfa85bd8113c9ea219c16deb",
+  app_compose_hash_payload: "b4e628a4eb5c3fb110c32b15efa4769e7fd58e74665ad2120841233b02a0620f",
+};
+// `approved` answers get_approved_measurements poll by poll (the last one repeats); "down" is an RPC outage.
 // Balance -1 is "no account yet", -2 an RPC outage. `lose` drops the answer to the first broadcast of that kind after applying it.
-function fakeNet(o: { balances?: bigint[]; registerFails?: string; keyList?: (keys: any[]) => any[]; lose?: "register" | "scope"; collateral?: object } = {}) {
+function fakeNet(o: { approved?: (unknown[] | "down")[]; balances?: bigint[]; registerFails?: string; keyList?: (keys: any[]) => any[]; lose?: "register" | "scope"; collateral?: object } = {}) {
   const balances = [...(o.balances ?? [NEAR])];
+  const approved = [...(o.approved ?? [[S3]])];
+  const calls: string[] = [];
   const txs: any[] = [];
   const quotes: string[] = [];
   const forms: string[] = [];
@@ -35,7 +49,12 @@ function fakeNet(o: { balances?: bigint[]; registerFails?: string; keyList?: (ke
       return Response.json({ quote_collateral: o.collateral ?? fixture.collateral });
     }
     const { method, params } = JSON.parse(init.body);
+    calls.push(params?.request_type === "call_function" ? params.method_name : params?.request_type ?? method);
     const ok = (result: unknown) => Response.json({ jsonrpc: "2.0", id: "x", result });
+    if (params?.request_type === "call_function" && params.method_name === "get_approved_measurements") {
+      const a = approved.length > 1 ? approved.shift()! : approved[0]!;
+      return a === "down" ? new Response("bad gateway", { status: 502 }) : ok({ result: [...Buffer.from(JSON.stringify(a))], logs: [] });
+    }
     if (method === "query" && params.request_type === "view_account") {
       const b = balances.length > 1 ? balances.shift()! : balances[0]!;
       if (b === -2n) return new Response("bad gateway", { status: 502 });
@@ -67,7 +86,7 @@ function fakeNet(o: { balances?: bigint[]; registerFails?: string; keyList?: (ke
     }
     throw new Error(`unexpected ${method} ${JSON.stringify(params)}`);
   }) as unknown as typeof fetch;
-  return { f, txs, quotes, forms };
+  return { f, txs, quotes, forms, calls };
 }
 
 const keys = () => {
@@ -106,7 +125,39 @@ describe("attestation", () => {
   });
 });
 
+describe("measurements", () => {
+  test("derived from tcb_info: rtmrs, the key-provider event digest of RTMR3 and the compose hash, as the contract has S3's", () => {
+    expect(measurementsOf(fixture.tcb_info)).toEqual(S3);
+    expect(() => measurementsOf({ ...fixture.tcb_info, event_log: [] })).toThrow("tcb key-provider event missing digest");
+  });
+});
+
 describe("bootTee", () => {
+  test("waits for the owner to approve this CVM's measurements before asking for funds, and spends nothing meanwhile", async () => {
+    const other = { ...S3, app_compose_hash_payload: "00".repeat(32) };
+    const net = fakeNet({ approved: [[], [other], "down", [other, S3]] });
+    const b = boot(net);
+    await b.p;
+    const events = b.lines.map(l => JSON.parse(l).event);
+    expect(JSON.parse(b.lines[0]!)).toMatchObject({ event: "tee_measurements", measurements: S3 });
+    expect(events.slice(0, 4)).toEqual(["tee_measurements", "tee_waiting_for_approval", "tee_approval_poll_failed", "tee_fund_me"]); // hourly: one waiting line for two polls
+    expect(b.slept.slice(0, 3)).toEqual([300_000, 300_000, 300_000]);
+    // nothing but approval polls before the fourth one said yes: no balance read, no tx
+    const firstOther = net.calls.findIndex(c => c !== "get_approved_measurements");
+    expect(net.calls.slice(0, firstOther)).toEqual(Array(4).fill("get_approved_measurements"));
+    expect(net.txs.length).toBe(2);
+  });
+  test("never approved: no tee_fund_me and no tx", async () => {
+    const net = fakeNet({ approved: [[]] });
+    const slept: number[] = [];
+    // the 20th wait never ends, so the boot stays parked there
+    const b = boot(net, { sleep: ms => (slept.push(ms), slept.length < 20 ? Promise.resolve() : new Promise<void>(() => {})) });
+    for (let i = 0; i < 100 && slept.length < 20; i++) await Bun.sleep(1);
+    expect(slept.length).toBe(20);
+    expect(b.lines.map(l => JSON.parse(l).event)).toEqual(["tee_measurements", "tee_waiting_for_approval", "tee_waiting_for_approval"]); // polls 0 and 12
+    expect(net.txs).toEqual([]);
+    expect(new Set(net.calls)).toEqual(new Set(["get_approved_measurements"]));
+  });
   test("asks to be funded, polls every 15 s until 0.6 NEAR, registers, swaps to a scoped key and returns it", async () => {
     const net = fakeNet({ balances: [-1n, NEAR / 2n, (6n * NEAR) / 10n] });
     const b = boot(net);
@@ -115,7 +166,7 @@ describe("bootTee", () => {
     expect(r.account).toBe(Buffer.from(F!.getPublicKey().data).toString("hex"));
     expect(r.account).toMatch(/^[0-9a-f]{64}$/);
     expect(r.key.getPublicKey().toString()).toBe(S!.getPublicKey().toString());
-    expect(JSON.parse(b.lines[0]!)).toEqual({ event: "tee_fund_me", account: r.account });
+    expect(JSON.parse(b.lines[1]!)).toEqual({ event: "tee_fund_me", account: r.account });
     expect(b.slept.filter(ms => ms === 15_000).length).toBe(2);
 
     const [reg, rot] = net.txs;
@@ -151,12 +202,12 @@ describe("bootTee", () => {
     const b = boot(net);
     await b.p;
     expect(b.slept).toEqual([15_000]);
-    expect(b.lines.map(l => JSON.parse(l).event)).toEqual(["tee_fund_me", "tee_retry", "tee_registered"]);
+    expect(b.lines.map(l => JSON.parse(l).event)).toEqual(["tee_measurements", "tee_fund_me", "tee_retry", "tee_registered"]);
     const lost = fakeNet({ lose: "scope" });
     const c = boot(lost);
     await c.p;
     expect(lost.txs.length).toBe(2); // the swap landed once and was not sent again
-    expect(c.lines.map(l => JSON.parse(l).event)).toEqual(["tee_fund_me", "tee_retry", "tee_registered"]);
+    expect(c.lines.map(l => JSON.parse(l).event)).toEqual(["tee_measurements", "tee_fund_me", "tee_retry", "tee_registered"]);
   });
   test("RPC trouble keeps failing: five tries 15 s doubling, then tee_stranded", async () => {
     const net = fakeNet();
@@ -169,7 +220,7 @@ describe("bootTee", () => {
   test("a failed balance poll is logged and polled again", async () => {
     const b = boot(fakeNet({ balances: [-2n, NEAR] }));
     await b.p;
-    expect(JSON.parse(b.lines[1]!)).toMatchObject({ event: "tee_fund_poll_failed" });
+    expect(JSON.parse(b.lines[2]!)).toMatchObject({ event: "tee_fund_poll_failed" });
     expect(b.slept).toEqual([15_000]);
   });
   test("refuses to serve when the account still has a key that is not vault-scoped", async () => {

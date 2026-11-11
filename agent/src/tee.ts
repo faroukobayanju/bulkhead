@@ -12,6 +12,8 @@ const STORAGE_DEPOSIT = NEAR / 100n; // first registration stores ~486 bytes
 // The scoped key's lifetime gas budget: with the full-access key gone nothing can top it up. The most check-agent-key.ts accepts.
 const ALLOWANCE = NEAR;
 const FUND_POLL_MS = 15_000;
+const APPROVAL_POLL_MS = 5 * 60_000;
+const APPROVAL_LOG_EVERY = 12; // one tee_waiting_for_approval line an hour
 const TRIES = 5; // register and the key swap: 15 s, 30 s, 60 s, 120 s between tries
 const RETRY_MS = 15_000;
 const LOW_ALLOWANCE = NEAR / 5n;
@@ -35,11 +37,31 @@ async function json(res: Response, what: string): Promise<any> {
   return res.json();
 }
 
+const dstack = (f: typeof fetch, path: string, body: unknown) => f(`http://localhost/${path}`, { method: "POST", ...DSTACK, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) } as RequestInit);
+async function tcbInfo(f: typeof fetch): Promise<any> {
+  const info = await json(await dstack(f, "Info", {}), "dstack Info");
+  return typeof info.tcb_info === "string" ? JSON.parse(info.tcb_info) : info.tcb_info;
+}
+
+// This CVM's measurements in the contract's FullMeasurementsHex shape, as propose_measurements takes them.
+export type Measurements = { rtmrs: { mrtd: string; rtmr0: string; rtmr1: string; rtmr2: string }; key_provider_event_digest: string; app_compose_hash_payload: string };
+export function measurementsOf(tcb: any): Measurements {
+  const kp = (tcb?.event_log ?? []).find((e: any) => e?.imr === 3 && e?.event === "key-provider");
+  return {
+    rtmrs: { mrtd: field(tcb, "mrtd", "tcb"), rtmr0: field(tcb, "rtmr0", "tcb"), rtmr1: field(tcb, "rtmr1", "tcb"), rtmr2: field(tcb, "rtmr2", "tcb") },
+    key_provider_event_digest: field(kp, "digest", "tcb key-provider event"),
+    app_compose_hash_payload: field(tcb, "compose_hash", "tcb"),
+  };
+}
+const sameMeasurements = (a: Measurements, b: Measurements) => {
+  const flat = (m: Measurements) => [m.rtmrs.mrtd, m.rtmrs.rtmr0, m.rtmrs.rtmr1, m.rtmrs.rtmr2, m.key_provider_event_digest, m.app_compose_hash_payload].map(x => String(x).toLowerCase()).join();
+  return flat(a) === flat(b);
+};
+
 // A quote over this account from the dstack guest socket, with Phala's collateral, in the shape register_agent takes.
 export async function buildAttestation(f: typeof fetch, account: string): Promise<Attestation> {
-  const post = (path: string, body: unknown) => f(`http://localhost/${path}`, { method: "POST", ...DSTACK, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) } as RequestInit);
-  const info = await json(await post("Info", {}), "dstack Info");
-  const tcb = typeof info.tcb_info === "string" ? JSON.parse(info.tcb_info) : info.tcb_info;
+  const post = (path: string, body: unknown) => dstack(f, path, body);
+  const tcb = await tcbInfo(f);
   const quoteHex = String((await json(await post("GetQuote", { report_data: reportData(account) }), "dstack GetQuote")).quote).replace(/^0x/, "");
   const form = new FormData();
   form.append("hex", quoteHex);
@@ -67,6 +89,21 @@ export async function bootTee(o: { fetch: typeof fetch; rpcUrl: string; vault: s
 
   const log = (event: string, data: Record<string, unknown> = {}) => o.log(JSON.stringify({ event, account, ...data }));
   const errOf = (e: unknown) => (e as Error)?.message ?? String(e);
+
+  // A first deploy's measurements wait out the owner's 24 h approval timelock. Wait here, before anyone funds the account, so a
+  // refused register_agent cannot strand the money. The PPID is not checked here (it is in the quote's PCK cert): the owner must
+  // already have approved Phala's PPID list.
+  const measurements = measurementsOf(await tcbInfo(o.fetch));
+  log("tee_measurements", { measurements });
+  for (let i = 0; ; i++) {
+    try {
+      if (((await vault.approvedMeasurements()) as Measurements[]).some(m => sameMeasurements(m, measurements))) break;
+      if (i % APPROVAL_LOG_EVERY === 0) log("tee_waiting_for_approval");
+    } catch (e) {
+      log("tee_approval_poll_failed", { error: errOf(e) });
+    }
+    await sleep(APPROVAL_POLL_MS);
+  }
 
   log("tee_fund_me");
   for (;;) {

@@ -425,6 +425,7 @@ export function makeVault(o: VaultOpts) {
     accessKeys,
     balance,
     funds,
+    approvedMeasurements: (): Promise<unknown[]> => vaultView("get_approved_measurements", {}),
     getRoots: (day: number): Promise<[number, string][]> => vaultView("get_roots", { day }),
     getTier,
     recoverSigned,
