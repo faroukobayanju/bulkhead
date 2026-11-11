@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { attestationFromTx, measurementsFromAttestation, PHALA_PPIDS } from "../lib/agent-approval";
+import { attestationFromTx, measurementsFromAttestation, parseMeasurements, PHALA_PPIDS } from "../lib/agent-approval";
 
 // The attestation the S3 agent sent from a Phala CVM (dstack 0.5.12).
 const S3 = await Bun.file(new URL("../../contracts/vault/tests/fixtures/s3-attestation.json", import.meta.url)).json();
@@ -44,5 +44,22 @@ describe("agent approval", () => {
     expect(PHALA_PPIDS.length).toBe(23);
     expect(PHALA_PPIDS.every((p) => /^[0-9a-f]{32}$/.test(p))).toBe(true);
     expect(PHALA_PPIDS).toContain("62d54040cb9dfc08bb13006fa75ece56");
+  });
+});
+
+describe("measurements from the agent log", () => {
+  test("the JSON the agent prints before funding parses to the same measurements", () => {
+    expect(parseMeasurements(JSON.stringify(S3_MEASUREMENTS))).toEqual(S3_MEASUREMENTS);
+  });
+
+  test("a wrong-length or non-hex field is refused, so a typo never reaches the owner call", () => {
+    const short = { ...S3_MEASUREMENTS, app_compose_hash_payload: "b4e6" };
+    expect(() => parseMeasurements(JSON.stringify(short))).toThrow("app_compose_hash_payload");
+    const upper = { ...S3_MEASUREMENTS, rtmrs: { ...S3_MEASUREMENTS.rtmrs, mrtd: S3_MEASUREMENTS.rtmrs.mrtd.toUpperCase() } };
+    expect(() => parseMeasurements(JSON.stringify(upper))).toThrow("mrtd");
+  });
+
+  test("missing fields are refused", () => {
+    expect(() => parseMeasurements(JSON.stringify({ rtmrs: S3_MEASUREMENTS.rtmrs }))).toThrow("key_provider_event_digest");
   });
 });
