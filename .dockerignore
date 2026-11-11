@@ -1,0 +1,11 @@
+.git
+.env*
+!.env.example
+**/node_modules
+.claude
+.superpowers
+contracts/target
+target
+web/.next
+web/e2e/screenshots
+dataset/attempts-*.jsonl

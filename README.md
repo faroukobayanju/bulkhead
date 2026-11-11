@@ -54,3 +54,10 @@ bunx convex env set AGENT_SECRET "<the same AGENT_SECRET as in .env>"
 MOCK_LLM=1 bun --env-file=.env agent/src/main.ts      # agent on :8787
 ```
 In `.env` mock mode needs only `NEAR_NETWORK=testnet`, `MOCK_LLM=1`, `CONVEX_SITE_URL`, and `AGENT_SECRET`, `PEPPER`, `SESSION_SECRET`, `PROXY_SECRET` (32+ bytes each). `curl -s localhost:8787/health` returns `{"ok":true,"mock":true}`. Every other route except `/v1/check` with an API key is reachable only through the web proxy, so send the header `x-bulkhead-proxy-secret: <PROXY_SECRET>` (and `x-real-ip`) when you call the agent by hand. Mock mode refuses to start on mainnet.
+
+## Run the agent in Docker
+```bash
+docker build -t bulkhead-agent .
+docker run --env-file .env -p 8787:8787 bulkhead-agent
+```
+The image holds no secrets: they come from the env file at run time. The nightly dataset export (`scripts/export-dataset.ts`, 00:10 UTC) and the hourly replay (`scripts/replay.ts`) are separate commands for the host's scheduler, run with `docker run ... bun scripts/<name>.ts`.
