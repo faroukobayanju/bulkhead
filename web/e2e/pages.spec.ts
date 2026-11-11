@@ -157,12 +157,22 @@ test("dataset: download link, row counts, schema and license", async ({ page }) 
   await expect(page.getByRole("link", { name: "Column schema" })).toHaveAttribute("href", /dataset\/README\.md$/);
   await expect(page.getByRole("link", { name: "CC-BY 4.0" })).toBeVisible();
   await expect(page.getByText(/bun run scripts\/verify-roots\.ts/)).toBeVisible();
+  await expect(page.getByText("The message exactly as the player wrote it", { exact: false })).toBeVisible();
+  await expect(page.getByText("it is in the signed payout transaction, listed on /verify", { exact: false })).toBeVisible();
 });
 
 test("rules: limits and the CC-BY consent", async ({ page }) => {
   await page.goto("/rules");
   await expect(page.getByText("One attempt per account per tier every 10 minutes.")).toBeVisible();
-  await expect(page.getByText(/published under CC-BY 4\.0/)).toBeVisible();
+  await expect(page.getByText(/published under CC-BY 4\.0/).first()).toBeVisible();
+  await expect(page.getByText("Your message is published exactly as you wrote it", { exact: false })).toBeVisible();
+  await expect(page.getByText("The full address is in the signed payout transaction", { exact: false })).toBeVisible();
+  await expect(page.getByTestId("owner-power")).toHaveText(/withdraw a tier's funds after a public timelock of 24 hours/);
+});
+
+test("the tier sidebar states the owner's withdraw power with the timelock from config", async ({ page }) => {
+  await page.goto("/tier/3");
+  await expect(page.getByTestId("owner-power")).toHaveText(/withdraw a tier's funds after a public timelock of 24 hours/);
 });
 
 test.describe("375 px", () => {

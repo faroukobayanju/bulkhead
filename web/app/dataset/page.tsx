@@ -73,9 +73,10 @@ export default async function DatasetPage() {
         <div className="prose">
           <h2>What is in it</h2>
           <ul className="muted">
-            <li>The message, the reply shown, the outcome and the firewall verdicts with their full reasons.</li>
+            <li>The message exactly as the player wrote it, anything typed into it included. The reply shown, the outcome and the firewall verdicts with their full reasons.</li>
             <li>The player's account only as a salted sha256. Never the account name or IP.</li>
-            <li>A winner's payout address, shortened. Every other payout address is replaced with a placeholder.</li>
+            <li>A winner's payout address, shortened. Outside the message, every other payout address is replaced with a placeholder.</li>
+            <li>A winner's full address is not hidden anywhere: it is in the signed payout transaction, listed on /verify and public on the chain.</li>
             <li>Rows hidden from the site after reports stay in the dataset.</li>
           </ul>
           <p className="small">

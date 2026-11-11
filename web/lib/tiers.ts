@@ -51,6 +51,11 @@ export function span(s: number): string {
   return `${n} ${unit}${n === 1 ? "" : "s"}`;
 }
 
+// The standing owner-power line for /rules and the tier pages (docs/claims.md, "Owner powers"). The timelock comes from the
+// contract's get_config; when that cannot be read the line still shows, without a length.
+export const ownerPowerLine = (timelockNs: number | null | undefined) =>
+  `The vault owner can pause the vault, and can withdraw a tier's funds after a public timelock${typeof timelockNs === "number" ? ` of ${span(timelockNs / 1e9)}` : " (its length is on /verify)"}. A pending withdraw is listed on /verify while it waits.`;
+
 // ---- pots ----
 export type Pot = { native: string; usd: number | null };
 export type PotState = { pot: Pot | null; at: string | null; stale: boolean };

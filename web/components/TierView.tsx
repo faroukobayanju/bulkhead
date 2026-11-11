@@ -2,7 +2,7 @@
 import { Warning } from "@phosphor-icons/react/ssr";
 import type { Arena } from "@/lib/arena";
 import { addressUrl, type TierId } from "@/lib/links";
-import { TIER_INFO, potText } from "@/lib/tiers";
+import { TIER_INFO, ownerPowerLine, potText } from "@/lib/tiers";
 import { AttemptPanel } from "./AttemptPanel";
 import { Countdown } from "./Countdown";
 import { StatusLabel } from "./Status";
@@ -23,7 +23,7 @@ export function TierView({ initial, tier }: { initial: Arena; tier: TierId }) {
         <div className="banner" role="alert">
           <Warning size={20} weight="bold" aria-label="Warning" className="warn" />
           <p>
-            The owner has proposed an emergency withdraw ({withdraw.map(w => `tier ${w.kind === "withdraw" ? w.tierId : ""}`).join(", ")}). It can run after its 24 hour timelock. Details on <a href="/verify">/verify</a>.
+            The owner has proposed an emergency withdraw ({withdraw.map(w => `tier ${w.kind === "withdraw" ? w.tierId : ""}`).join(", ")}). It can run once its timelock ends. Details on <a href="/verify">/verify</a>.
           </p>
         </div>
       )}
@@ -67,6 +67,7 @@ export function TierView({ initial, tier }: { initial: Arena; tier: TierId }) {
           <div className="prose small muted">
             <p>The contract caps each payout and waits {t.cooldownS ? `${t.cooldownS >= 3600 ? `${t.cooldownS / 3600} h` : `${t.cooldownS} s`}` : "a cooldown"} between rounds, so even a guard that is fully fooled can lose one round at a time.</p>
             <p>Limits: one attempt per account on this tier every 10 minutes, 20 per network per hour.</p>
+            <p data-testid="owner-power">{ownerPowerLine(arena.config?.timelock_ns)}</p>
           </div>
         </aside>
       </div>

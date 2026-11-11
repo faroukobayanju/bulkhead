@@ -1,11 +1,14 @@
 import Link from "next/link";
-import { network } from "@/lib/arena";
+import { loadConfig, network } from "@/lib/arena";
 import { CONSENT_VERSION } from "@/lib/near";
+import { ownerPowerLine } from "@/lib/tiers";
 
+export const dynamic = "force-dynamic";
 export const metadata = { title: "Rules" };
 
-export default function RulesPage() {
+export default async function RulesPage() {
   const net = network();
+  const cfg = await loadConfig();
   return (
     <div className="stack" style={{ maxWidth: 760 }}>
       <header className="stack">
@@ -33,7 +36,9 @@ export default function RulesPage() {
       </section>
       <section className="prose section">
         <h2>What we publish</h2>
-        <p>By playing you agree that your attempts are published under CC-BY 4.0: your message, the reply you were shown, the outcome and the firewall verdicts. Your account is stored only as a salted hash and your IP address is never published. A winner's payout address is shown, shortened. Do not put anything in a message you would not want public.</p>
+        <p>By playing you agree that your attempts are published under CC-BY 4.0: your message, the reply you were shown, the outcome and the firewall verdicts. Your account is stored only as a salted hash and your IP address is never published.</p>
+        <p>Your message is published exactly as you wrote it, so anything you type into it, an address or a name included, is public. Do not put anything in a message you would not want public.</p>
+        <p>A winner's payout address is shown shortened on this site. The full address is in the signed payout transaction, which is listed on /verify and is public on the chain.</p>
         <p>
           Details are on the <Link href="/dataset">dataset page</Link>.
         </p>
@@ -44,8 +49,12 @@ export default function RulesPage() {
           <li>Attack the guards with words only. Attacking the site, the agent host, the contract or other players is out of bounds and voids a win.</li>
           <li>You must be allowed to receive the payout where you live. People and places under sanctions cannot play.</li>
           <li>Payouts are not replace-by-fee. If a Bitcoin payout is stuck, the winner can speed it up with a child-pays-for-parent transaction.</li>
-          <li>{net === "testnet" ? "This is the testnet arena. Its coins have no value." : "Pots are real coins."}</li>
+          <li>{net === "testnet" ? "This is the testnet arena. Its coins have no value." : "The pots hold coins with real value."}</li>
         </ul>
+      </section>
+      <section className="prose section">
+        <h2>What the owner can do</h2>
+        <p data-testid="owner-power">{ownerPowerLine(cfg?.timelock_ns)}</p>
       </section>
     </div>
   );

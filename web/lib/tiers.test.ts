@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatNative, mergePot, potText, span, tierStatus, type ContractTier } from "./tiers";
+import { formatNative, mergePot, ownerPowerLine, potText, span, tierStatus, type ContractTier } from "./tiers";
 
 const NOW = Date.UTC(2026, 10, 10, 12, 0, 0);
 const base: ContractTier = {
@@ -38,6 +38,12 @@ test("span: a length of time in words, for timelocks and cooldowns", () => {
   expect(span(60)).toBe("60 seconds");
   expect(span(1)).toBe("1 second");
   expect(span(5400)).toBe("90 minutes");
+});
+
+test("the owner-power line reads the timelock from config, and still shows without one", () => {
+  expect(ownerPowerLine(86_400_000_000_000)).toContain("withdraw a tier's funds after a public timelock of 24 hours");
+  expect(ownerPowerLine(60_000_000_000)).toContain("timelock of 60 seconds");
+  expect(ownerPowerLine(null)).toContain("withdraw a tier's funds after a public timelock (its length is on /verify)");
 });
 
 describe("pots", () => {

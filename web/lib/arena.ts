@@ -123,6 +123,12 @@ export async function loadArena(now = Date.now()): Promise<Arena> {
   return build(n, now, config as Config | undefined, raw as (ContractTier | null | undefined)[], units, (usd as number | null | undefined) ?? null, pending as Pending[] | undefined, false);
 }
 
+// Only get_config, for pages that need the owner timelock and nothing else. null when it cannot be read.
+export async function loadConfig(): Promise<Config | null> {
+  if (isMock()) return (fixture as any).config;
+  return (await settle(view<Config>("get_config"))) ?? null;
+}
+
 // For /verify: is the codehash the agent reports approved in the contract? undefined when it cannot be read.
 export async function codehashApproved(codehash: string): Promise<boolean | undefined> {
   if (isMock()) return (fixture as any).codehash_approved;
