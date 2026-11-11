@@ -30,7 +30,8 @@ Building is allowed now (HACKATHON.md Q-001: eligible work starts 2026-10-19).
   - **Agent must check before calling `release_funds`:** a successful signature spends a round even if the Bitcoin tx can never be broadcast. Read the UTXO's real value and unspent status from mempool.space first, and confirm the tier address matches `derived_public_key` for the tier path (see `docs/spikes.md`).
 - **Spike S1 done on testnet (2026-11-02), see `docs/spikes.md`:** the vault signed Bitcoin testnet4 payout `a8ecea7c…8b1a` through `v1.signer-prod.testnet`, and Bitcoin rejected the same payout signed with a false input amount. How the agent assembles and broadcasts the tx is written up there, with reference code in `scripts/spike-s1/`.
 - **Do not deploy to mainnet:** the contract has had no review yet.
-- **Next:** rename to `bulkhead` and `scripts/deploy-vault.ts` (E24), then S3, then Task 10. Agents attach 300 TGas, never max gas (E14b).
+- **Spike S3 done on testnet (2026-11-11), see `docs/spikes.md`:** the template agent registered from a real Phala TDX CVM. Approval is by measurements plus PPID, not codehash, and the Shade CLI cannot deploy to a current dstack image, so measurements are approved from the agent's own attestation.
+- **Next:** Task 10. Agents attach 300 TGas, never max gas (E14b).
 - **Choices already made:** Rust pinned to 1.96 because near-sdk 5.30 needs a newer compiler. `ReleasePayload` was added in Task 3, ahead of Task 4.
 
 ## Interface freeze (end of day 2), owned jointly
