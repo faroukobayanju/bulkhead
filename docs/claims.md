@@ -24,7 +24,7 @@ Every claim Bulkhead makes, what backs it, and what is not done. If a claim is n
 
 | Topic | Status |
 |---|---|
-| Agent in a TEE (Shade Agent) | Not deployed. The testnet vault registers the agent with a stub codehash (`register_agent_stub`, testnet builds only). Until Task 10 lands, nothing here says the agent runs in a TEE. |
+| Agent in a TEE (Shade Agent) | The vault checks a Phala TDX attestation in `register_agent` against owner-approved measurements and machine IDs (PR #5, tested against a real quote from spike S3). The agent's boot flow for it is built but has not run in a Phala CVM. Until it does, the testnet vault registers the agent with a stub (`register_agent_stub`, testnet builds only), and nothing here says the agent runs in a TEE. A registration lasts 7 days; a renewal re-sends a quote, so it does not prove the agent is fresh. |
 | Attestation checks not done | The Intel quote signature chain and TCB status, MRCONFIGID and the RTMR3 event log, TLS certificate binding, and the NVIDIA JWT signature. Listed in `NOT_VERIFIED` in `agent/src/attest.ts`. |
 | Mainnet | Nothing is on mainnet. The contract has not had an outside review. |
 | Owner powers | The owner can pause the vault and, after a timelock, withdraw a tier's funds (`propose_emergency_withdraw`, then `execute_emergency_withdraw`). The timelock is 24 hours in the default build and 60 seconds in the testnet short-timelock build. So "nobody can move the funds" is not true. |

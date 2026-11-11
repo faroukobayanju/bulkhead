@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { CopyButton, DownloadJson } from "@/components/CopyDownload";
 import { Countdown } from "@/components/Countdown";
 import { callAgent } from "@/lib/agent";
-import { codehashApproved, isMock, loadArena } from "@/lib/arena";
+import { agentRegistration, isMock, loadArena } from "@/lib/arena";
 import { broadcastUrl, CHAIN_OF, nearTxUrl } from "@/lib/links";
 import { loadPublic } from "@/lib/public-data";
 import { span } from "@/lib/tiers";
@@ -22,6 +22,7 @@ type Attestation = {
   judge_model: string;
   firewall_version: string;
   mock: boolean;
+  agent_account?: string;
   tee?: boolean;
   verification:{ verified: string[]; not_verified: string[] };
 };
@@ -72,11 +73,15 @@ const fmtTime = (ms: number) => new Date(ms).toISOString().replace("T", " ").sli
 
 export default async function VerifyPage() {
   const [att, arena, pub, digest] = await Promise.all([attestation(), loadArena(), loadPublic(), imageDigest()]);
-  const approved = att ? await codehashApproved(att.codehash) : undefined;
+  const reg = att?.agent_account ? await agentRegistration(att.agent_account) : undefined;
+  const now = Date.now();
+  const regValid = reg ? Number(reg.valid_until_ms) > now : reg === null ? false : undefined;
+  // The stub registration (testnet, no TEE) carries the all-zero mock measurements.
+  const stub = reg ? /^0+$/.test(reg.measurements.rtmrs.mrtd) : false;
   const digestMatch = digest && att ? digest.replace(/^sha256:/, "") === att.codehash.replace(/^sha256:/, "") : null;
-  const mismatch = approved === false || digestMatch === false;
+  const mismatch = regValid === false || digestMatch === false;
   const cfg = arena.config;
-  const tee = att?.tee === true; // no agent build reports this yet (Task 10)
+  const tee = att?.tee === true && reg !== undefined && reg !== null && !stub;
   const net = arena.network;
 
   return (
@@ -95,25 +100,34 @@ export default async function VerifyPage() {
         <div className="banner bad" data-testid="mismatch-banner" role="alert">
           <XCircle size={20} weight="bold" aria-label="Fails" className="bad" />
           <p>
-            <strong>Mismatch.</strong> The code the agent reports running is {approved === false ? "not approved in the vault contract" : "not the published image"}. Do not trust payouts from it.
+            <strong>Mismatch.</strong> {regValid === false ? "The agent is not registered in the vault contract, or its registration has expired." : "The code the agent reports running is not the published image."} Do not trust payouts from it.
           </p>
         </div>
       )}
 
       <ul className="checklist">
-        <Row tone={tee ? "info" : "warn"} title={tee ? "Agent runs in a TEE: reported by the agent's /attestation" : "Agent runs in a TEE: not yet (testnet, stub codehash)"} testId="tee-row">
+        <Row tone={tee ? "ok" : "warn"} title={tee ? "Agent runs in a TEE: checked by the vault contract" : "Agent runs in a TEE: not yet (testnet, stub registration)"} testId="tee-row">
           {tee
-            ? "The agent's /attestation says it runs in a TEE. This page does not check that itself."
-            : "The agent runs on an ordinary server. The testnet vault registered it with a stub codehash, so the codehash below is a label the agent reports, not a measurement of the code it runs."}
+            ? "The vault contract verified the agent's Intel TDX quote when it registered, against measurements and a machine ID the owner approved through the timelock."
+            : "The agent runs on an ordinary server. The testnet vault registered it with a stub, so no TEE measurement backs it. The codehash it reports is a label, not a measurement of the code it runs."}
         </Row>
-        {/* Reported, not proven: without a TEE, the agent says which codehash it runs and the contract says that codehash is approved. */}
+        {/* The contract's own record: release_funds refuses an agent that is unregistered, expired, or whose approvals were removed. */}
         <Row
-          tone={approved === false ? "bad" : approved === true ? "info" : "none"}
-          title="Codehash the agent reports is approved"
-          raw={att ? { codehash: att.codehash, is_codehash_approved: approved ?? "unreadable" } : undefined}
+          tone={regValid === false ? "bad" : regValid === true ? "ok" : "none"}
+          title="Agent is registered in the vault"
+          raw={att ? { agent_account: att.agent_account ?? null, get_agent: reg === undefined ? "unreadable" : reg } : undefined}
         >
-          <span data-testid="codehash-match">{approved === true ? "Match" : approved === false ? "Mismatch" : "Unknown: the agent or the contract cannot be read right now"}</span>
-          {att && <div className="mono muted">{att.codehash}</div>}
+          <span data-testid="agent-registered">
+            {regValid === true
+              ? `Registered until ${fmtTime(Number(reg!.valid_until_ms))}${stub ? " (stub registration)" : ""}`
+              : reg === null
+                ? "Not registered"
+                : regValid === false
+                  ? "Registration expired"
+                  : "Unknown: the agent or the contract cannot be read right now"}
+          </span>
+          {att?.agent_account && <div className="mono muted">{att.agent_account}</div>}
+          {reg && !stub && <div className="mono muted">compose hash {reg.measurements.app_compose_hash_payload.slice(0, 16)}…, machine {reg.ppid}</div>}
         </Row>
         <Row tone={digestMatch === true ? "ok" : digestMatch === false ? "bad" : "none"} title="Running codehash equals the published image digest" raw={digest ?? undefined}>
           {digest === null ? "No image digest is published yet." : digestMatch ? "Match" : "Mismatch"}
@@ -209,9 +223,13 @@ export default async function VerifyPage() {
             <ul className="labels">
               {arena.pending.map((p, i) => (
                 <li key={i}>
-                  {p.kind === "codehash" ? (
+                  {p.kind === "measurements" ? (
                     <span>
-                      New codehash <span className="mono">{p.codehash.slice(0, 12)}…</span>
+                      New TEE measurements, compose hash <span className="mono">{p.composeHash.slice(0, 12)}…</span>
+                    </span>
+                  ) : p.kind === "ppid" ? (
+                    <span>
+                      New TEE machine <span className="mono">{p.ppid}</span>
                     </span>
                   ) : (
                     <span>

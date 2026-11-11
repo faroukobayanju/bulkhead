@@ -10,6 +10,8 @@
   "judge_model": "Qwen/Qwen3.8-27B",
   "firewall_version": "fw-v1",
   "mock": false,
+  "agent_account": "bulkhead-agent.testnet",
+  "tee": false,
   "verification": {
     "verified": ["gateway_and_model_nonce", "signing_address_present_on_every_model_entry", "quote_report_data_binds_address_and_nonce", "nvidia_nras_verdict", "response_signature_checked_and_recorded_per_attempt"],
     "not_verified": ["tdx_quote_signature_and_tcb_status (dcap-qvl)", "tdx_mrconfigid_and_rtmr3_event_log", "tls_certificate_binding", "nvidia_nras_jwt_signature"]

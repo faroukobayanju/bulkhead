@@ -1,11 +1,16 @@
-// Server only. Reads the vault contract and the pots: get_tier, get_config, pending_owner_actions, is_codehash_approved over NEAR
+// Server only. Reads the vault contract and the pots: get_tier, get_config, pending_owner_actions, get_agent over NEAR
 // RPC; balances from mempool.space (Bitcoin) and a Base RPC (USDC). Every read can fail on its own and comes back as null.
 import fixture from "../fixtures/arena.json";
 import { CHAIN_OF, mempoolApi, type Network, type TierId } from "./links";
 import { checkMode } from "./mode";
 import { formatNative, tierStatus, type ContractTier, type Pot, type TierState } from "./tiers";
 
-export type Pending = { kind: "codehash"; codehash: string; readyAt: number } | { kind: "withdraw"; tierId: number; to: string; readyAt: number };
+export type Pending =
+  | { kind: "measurements"; composeHash: string; readyAt: number }
+  | { kind: "ppid"; ppid: string; readyAt: number }
+  | { kind: "withdraw"; tierId: number; to: string; readyAt: number };
+// What the vault holds for a registered agent (get_agent). Stub registrations carry the all-zero mock measurements and PPID.
+export type AgentReg = { measurements: { rtmrs: { mrtd: string }; app_compose_hash_payload: string }; ppid: string; valid_until_ms: string };
 export type Config = { timelock_ns: number; mainnet: boolean; stub_attestation: boolean; locked: boolean; paused: boolean };
 export type ArenaTier = {
   id: TierId;
@@ -72,12 +77,14 @@ async function btcUsd(n: Network): Promise<number | null> {
   return Number((await r.json()).USD) || null;
 }
 
-const pendingOf = (raw: any[]): Pending[] =>
-  raw.map(p =>
-    "Codehash" in p
-      ? { kind: "codehash" as const, codehash: p.Codehash.codehash, readyAt: p.Codehash.ready_at_ns / 1e6 }
-      : { kind: "withdraw" as const, tierId: p.EmergencyWithdraw.tier_id, to: p.EmergencyWithdraw.to, readyAt: p.EmergencyWithdraw.ready_at_ns / 1e6 },
-  );
+// An action kind this page does not know yet is left out rather than breaking the page.
+export const pendingOf = (raw: any[]): Pending[] =>
+  raw.flatMap((p): Pending[] => {
+    if (p?.Measurements) return [{ kind: "measurements", composeHash: p.Measurements.measurements.app_compose_hash_payload, readyAt: p.Measurements.ready_at_ns / 1e6 }];
+    if (p?.Ppid) return [{ kind: "ppid", ppid: p.Ppid.ppid, readyAt: p.Ppid.ready_at_ns / 1e6 }];
+    if (p?.EmergencyWithdraw) return [{ kind: "withdraw", tierId: p.EmergencyWithdraw.tier_id, to: p.EmergencyWithdraw.to, readyAt: p.EmergencyWithdraw.ready_at_ns / 1e6 }];
+    return [];
+  });
 
 function build(n: Network, now: number, config: Config | undefined, raw: (ContractTier | null | undefined)[], units: (bigint | undefined)[], usd: number | null, pending: Pending[] | undefined, mock: boolean): Arena {
   const tiers = IDS.map((id, i): ArenaTier => {
@@ -104,7 +111,7 @@ export async function loadArena(now = Date.now()): Promise<Arena> {
   if (isMock()) {
     const f = fixture as any;
     const raw = f.tiers.map((t: any) => ({ ...t, cooldown_until_ns: t.cooldown_in_s ? (now + t.cooldown_in_s * 1000) * 1e6 : t.cooldown_until_ns }));
-    const pending = pendingOf(f.pending.map((p: any) => ({ Codehash: { ...p.Codehash, ready_at_ns: (now + p.Codehash.ready_at_ns_in_s * 1000) * 1e6 } })));
+    const pending = pendingOf(f.pending.map((p: any) => ({ Measurements: { ...p.Measurements, ready_at_ns: (now + p.Measurements.ready_at_ns_in_s * 1000) * 1e6 } })));
     return build(n, now, f.config, raw, IDS.map(id => BigInt(f.balances[id])), f.btc_usd, pending, true);
   }
   const [config, pending, usd, ...raw] = await Promise.all([
@@ -129,8 +136,8 @@ export async function loadConfig(): Promise<Config | null> {
   return (await settle(view<Config>("get_config"))) ?? null;
 }
 
-// For /verify: is the codehash the agent reports approved in the contract? undefined when it cannot be read.
-export async function codehashApproved(codehash: string): Promise<boolean | undefined> {
-  if (isMock()) return (fixture as any).codehash_approved;
-  return settle(view<boolean>("is_codehash_approved", { codehash }));
+// For /verify: the vault's record of the agent account. null when not registered, undefined when it cannot be read.
+export async function agentRegistration(account: string): Promise<AgentReg | null | undefined> {
+  if (isMock()) return (fixture as any).agent;
+  return settle(view<AgentReg | null>("get_agent", { account_id: account }));
 }

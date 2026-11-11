@@ -8,8 +8,8 @@
 
 - **Network:** testnet only. Tiers hold Bitcoin testnet4 coins. No mainnet, no real money. Every page and post says "testnet".
 - **Tiers:** 1 and 3 on Bitcoin testnet4, following the go/no-go rule. Tier 2 (Base) is off (`TIER_ENABLED_2=0` on the agent and the web) unless a Base testnet run is green by the decision point.
-- **Agent registration:** the testnet vault is built with `stub-attestation`, and the owner calls `register_agent_stub(agent, "testnet-stub")`. `scripts/deploy-vault.ts` already does this.
-- **Agent host:** an ordinary server, not a TEE. The agent signs with a function-call key limited to `release_funds` and `log_attempt_roots` on the vault.
+- **Agent registration:** the testnet vault is built with `stub-attestation`, and the owner calls `register_agent_stub(agent)`. `scripts/deploy-vault.ts` already does this. A stub registration expires after 7 days: call it again before judging.
+- **Agent host:** an ordinary server, not a TEE. The agent signs with a function-call key limited to `release_funds`, `log_attempt_roots` and `register_agent` on the vault; it refuses to start otherwise (`keysAreScoped`).
 - **Claims:** `/verify` and `docs/claims.md` say the agent is not in a TEE and its codehash is the stub. The NEAR AI model checks that `attest.ts` really verifies stay labeled verified. Nothing says "TEE verified".
 
 What stays the same: the contract cap, cooldown and rounds; the firewall on tier 3; the dataset and roots; the website.
@@ -19,7 +19,7 @@ What stays the same: the contract cap, cooldown and rounds; the firewall on tier
 | # | Step | Owner | By |
 |---|---|---|---|
 | 1 | Deploy one testnet vault with tiers 1 and 3 (`scripts/deploy-vault.ts`, plus `configure_tier` for the second tier if the script does one tier per vault). Small cap, cooldown of at least 60 s, 5 rounds. | Friend (A) | Nov 12 |
-| 2 | Create the agent account and its function-call key (`release_funds`, `log_attempt_roots`), register it with `register_agent_stub`. Key goes only into the agent host's env. | Friend (A) | Nov 12 |
+| 2 | Create the agent account and its function-call key (`release_funds`, `log_attempt_roots`, `register_agent`, allowance at most 1 NEAR), register it with `register_agent_stub`. Key goes only into the agent host's env. | Friend (A) | Nov 12 |
 | 3 | Fund both tier addresses from a testnet4 faucet. | Either | Nov 12 |
 | 4 | Run `scripts/attack-demo.ts --testnet` step 4: over the cap gives `ERR_OVER_CAP`, within the cap pays, a repeat gives `ERR_COOLDOWN`. Record the tx links. This is the demo's opening shot. | Both | Nov 12 |
 | 5 | Convex production deployment (`bunx convex deploy`), `AGENT_SECRET` set there. | Me (B) | Nov 12 |

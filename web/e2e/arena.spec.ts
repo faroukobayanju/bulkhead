@@ -16,9 +16,9 @@ test("message counter blocks over 2000 chars", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
 });
 
-test("verify page is green when codehash matches", async ({ page }) => {
+test("verify page is green when the agent is registered", async ({ page }) => {
   await page.goto("/verify");
-  await expect(page.getByTestId("codehash-match")).toHaveText(/match/i);
+  await expect(page.getByTestId("agent-registered")).toHaveText(/^Registered until .* \(stub registration\)$/);
   await expect(page.getByTestId("mismatch-banner")).toHaveCount(0);
 });
 
