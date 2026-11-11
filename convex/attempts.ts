@@ -207,11 +207,12 @@ export const winners = query({
 });
 
 // For /verify: payouts the contract signed that are not broadcast yet, with the signed hex so anyone can broadcast it. The hex
-// pays the winner and nobody else, so it is safe to publish. Visible rows only; hex is null until the agent has stored it.
+// pays the winner and nobody else, so it is safe to publish. Hidden rows are listed too: only id, tier, time and transactions come
+// back, never player text, and a hidden row's payout must still be broadcastable. hex is null until the agent has stored it.
 export const pendingBroadcasts = query({
   args: {},
   handler: async ctx => {
-    const rows = await ctx.db.query("attempts").withIndex("by_hidden_outcome_ts", q => q.eq("hidden", false).eq("outcome", "signed_pending_broadcast")).order("desc").take(20);
+    const rows = await ctx.db.query("attempts").withIndex("by_outcome_ts", q => q.eq("outcome", "signed_pending_broadcast")).order("desc").take(20);
     return await Promise.all(
       rows.map(async r => {
         const tx = await ctx.db.query("signed_txs").withIndex("by_attempt", q => q.eq("attempt_id", r.id)).first();

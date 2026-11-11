@@ -326,7 +326,9 @@ describe("public queries", () => {
     expect(text(rows)).not.toContain("HIDDEN-WINNER");
   });
 
-  test("pendingBroadcasts gives the signed hex of visible signed_pending_broadcast rows, and nothing else", async () => {
+  // A hidden row's payout is still listed: the signed hex holds no player text, and a payout must never be hidden from the people
+  // who can broadcast it. Nothing else of the row comes back.
+  test("pendingBroadcasts gives the signed hex of every signed_pending_broadcast row, hidden or not, and nothing else", async () => {
     await seed();
     for (const [n, hidden] of [[5, false], [6, true]] as const) {
       await s.post("attempt_insert", wireRow({ id: idN(n), tier: 1, outcome: "releasing", stage: "signing", ts: `2026-11-02T12:00:0${n}.000Z` }));
@@ -340,8 +342,10 @@ describe("public queries", () => {
     const rows = (await s.t.query(api.attempts.pendingBroadcasts, {})) as any[];
     expect(rows).toEqual([
       { id: idN(7), tier: 3, ts: "2026-11-02T12:00:07.000Z", near_tx: null, chain: null, hex: null },
+      { id: idN(6), tier: 1, ts: "2026-11-02T12:00:06.000Z", near_tx: "ntx6", chain: "btc", hex: "02000006ab" },
       { id: idN(5), tier: 1, ts: "2026-11-02T12:00:05.000Z", near_tx: "ntx5", chain: "btc", hex: "02000005ab" },
     ]);
+    expect(JSON.stringify(rows)).not.toContain("hello dragon"); // no player text
   });
 
   test("only a winner's payout is shown, shortened; a near miss shows none", async () => {
