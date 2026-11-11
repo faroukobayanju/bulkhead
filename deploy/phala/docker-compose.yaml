@@ -4,12 +4,11 @@
 # measurements the vault approves: change any line and the owner has to approve new measurements.
 # Only secrets come in as encrypted env (Phala's "allowed envs"); the dashboard cannot change anything else.
 #
-# Before deploying, replace the REPLACE_ values:
-#   - the image digest, from `docker buildx build --platform linux/amd64 --push` (see docs/deploy-tee-agent.md);
+# Image: built from commit 18632e6 with `git archive HEAD | docker buildx build --platform linux/amd64 --push -`.
 # CODEHASH repeats the image digest so /attestation and every verdict name the image this CVM runs.
 services:
   bulkhead-agent:
-    image: docker.io/REPLACE_USER/bulkhead-agent@sha256:REPLACE_DIGEST
+    image: docker.io/faroukcodes/bulkhead-agent@sha256:be24ef0038f3b8a5d0e497646ecc24cde567c8d344e868b4861ca8396765812a
     platform: linux/amd64
     container_name: bulkhead-agent
     restart: always
@@ -26,7 +25,7 @@ services:
       TIER_ENABLED_1: "1"
       TIER_ENABLED_2: "0"
       TIER_ENABLED_3: "1"
-      CODEHASH: sha256:REPLACE_DIGEST
+      CODEHASH: sha256:be24ef0038f3b8a5d0e497646ecc24cde567c8d344e868b4861ca8396765812a
       FIREWALL_VERSION: fw-v1
       # secrets, set as encrypted env in the Phala dashboard
       NEARAI_API_KEY: ${NEARAI_API_KEY}
