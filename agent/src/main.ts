@@ -18,6 +18,8 @@ import { makeArenaFirewall } from "./pipeline";
 import { RateLimiter } from "./ratelimit";
 import { makeAlert, makeServer, type ChainDeps } from "./server";
 import { bootTee, startRenewal } from "./tee";
+import { startRootsPoster } from "./roots";
+import { buildDay } from "../../scripts/export-dataset";
 
 export type Started = { http: ReturnType<typeof Bun.serve>; stop: () => Promise<void>; locks: ReadonlySet<number>; lockedBy: ReadonlyMap<number, string> };
 
@@ -133,6 +135,9 @@ export async function start(env: Record<string, string | undefined> = process.en
   // failed bind leaves no timer behind.
   const stopRebroadcast = real?.startRebroadcast({ alert, intervalMs: o.rebroadcastMs, firstMs: o.rebroadcastFirstMs, warn: (what, id, e) => log(what, { id, error: (e as Error)?.name ?? "unknown" }) });
   const stopRenewal = tee && real ? startRenewal({ fetch: f, account: tee.account, register: real.registerAgent, funds: real.funds, log: out, alert }) : undefined;
+  // The day's roots, with the agent's own key: in the TEE nothing else can post them. Live testnet too; the script's
+  // --post-roots run and this one agree, since a day already holding the same roots counts as done.
+  const stopRoots = real && !cfg.mock ? startRootsPoster({ build: d => buildDay(db, d), vault: real, log, alert }) : undefined;
   out(JSON.stringify({ event: "listening", port: http.port, mock: cfg.mock, network: cfg.network }));
   return {
     http,
@@ -140,6 +145,7 @@ export async function start(env: Record<string, string | undefined> = process.en
     lockedBy: server.lockedBy,
     stop: async () => {
       stopRenewal?.();
+      stopRoots?.();
       stopRebroadcast?.();
       await stopRebroadcast?.idle(); // a run already going finishes before the server is reported stopped
       await http.stop(true);

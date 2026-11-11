@@ -5,7 +5,8 @@
 // - Cron: 00:10 UTC daily. A day is refused until 5 minutes after it ends, so a run at 00:00 would refuse.
 // - Run it on the agent host, with the agent's env: the agent's clock writes each row's ts, and this clock decides when the day is
 //   over. On another machine a clock behind the agent's could close a day before its last rows are in.
-// - --post-roots signs with AGENT_PRIVATE_KEY, which only exists on testnet today. The Shade Agent signer is wired in Task 10.
+// - --post-roots signs with AGENT_PRIVATE_KEY (testnet only). In TEE mode only the agent holds its key, so the agent posts the roots
+//   itself at 00:10 UTC (agent/src/roots.ts); run this script without --post-roots to write the files.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ConfigError, loadConfig, type Config } from "../agent/src/config";
@@ -20,7 +21,7 @@ const DAY_MS = 86_400_000;
 const GRACE_MS = 5 * 60_000; // a row's ts is taken just before its insert: wait a little past midnight so the last ones are in
 const HEX64 = /^[0-9a-f]{64}$/;
 
-type RootsVault = { getRoots(day: number): Promise<[number, string][]>; logAttemptRoots(day: number, roots: [number, string][]): Promise<void> };
+export type RootsVault = { getRoots(day: number): Promise<[number, string][]>; logAttemptRoots(day: number, roots: [number, string][]): Promise<void> };
 type IO = { fetch: typeof fetch; log: (s: string) => void; now: () => number; dir: string; db: Pick<Db, "listAttempts">; vault: RootsVault };
 
 const FW_KEYS = ["verdict", "risk", "technique", "reason", "firewall_version", "codehash", "latency_ms", "degraded"] as const;
@@ -98,13 +99,50 @@ export async function main(argv: string[], env: Record<string, string | undefine
   if (post && !vault) {
     if (!cfg.vaultAccount) return refuse(log, "--post-roots needs VAULT_ACCOUNT");
     try {
-      // ponytail: signs with the testnet AGENT_PRIVATE_KEY (makeChainDeps throws without it); pass the Shade signer once Task 10 has it
+      // signs with the testnet AGENT_PRIVATE_KEY (makeChainDeps throws without it); in the TEE the agent posts the roots itself
       vault = makeChainDeps(cfg, { db: db as never, onSettled: () => {}, fetch: http });
     } catch (e) {
       return refuse(log, `--post-roots: ${(e as Error).message}`);
     }
   }
 
+  const built = await buildDay(db, date);
+  if (!built.ok) {
+    log(`${built.reason}. Nothing was written.`);
+    return 1;
+  }
+  const { out, roots } = built;
+
+  mkdirSync(dir, { recursive: true });
+  const jsonl = join(dir, `attempts-${date}.jsonl`);
+  const rootsFile = join(dir, `roots-${date}.json`);
+  writeFileSync(jsonl, out.map(r => JSON.stringify(r) + "\n").join(""));
+  writeFileSync(rootsFile, JSON.stringify(Object.fromEntries(roots), null, 2) + "\n");
+  // ponytail: pushing these to the public data repo (with DATASET_DEPLOY_KEY) is not built; commit and push the two files by hand
+  log(`wrote ${out.length} rows in ${roots.length} hours:\n  ${jsonl}\n  ${rootsFile}`);
+
+  if (!post) return 0;
+  if (!roots.length) {
+    log(`no attempts on ${date}: no roots to post`);
+    return 0;
+  }
+  try {
+    const r = await postRoots(vault!, day, roots);
+    if (r === "differ") {
+      log(`roots for ${date} (day ${day}) on-chain differ from this export`);
+      return 1;
+    }
+    log(r === "already" ? `roots for ${date} (day ${day}) are already on-chain and match` : `posted ${roots.length} roots for ${date} (day ${day})`);
+    return 0;
+  } catch (e) {
+    log(`posting roots for ${date} failed: ${(e as Error).message}`);
+    return 1;
+  }
+}
+
+// One UTC day: its rows, every stored leaf rechecked, the export rows and the hourly roots. Writes nothing. The day must be over.
+export async function buildDay(db: Pick<Db, "listAttempts">, date: string): Promise<{ ok: true; out: ReturnType<typeof toExportRow>[]; roots: [number, string][] } | { ok: false; reason: string }> {
+  const start = epochDay(date) * DAY_MS;
   // the export pages in ts order from `since`, past the end of the day: stop at the first row of the next day
   const since = isoMs(start), until = isoMs(start + DAY_MS);
   const rows: Record<string, any>[] = [];
@@ -120,55 +158,28 @@ export async function main(argv: string[], env: Record<string, string | undefine
     try {
       leaf = attemptLeaf(r as LeafInput);
     } catch {}
-    if (leaf !== r.leaf) {
-      log(`leaf mismatch: attempt ${r.id} does not hash to its stored leaf. Nothing was written.`);
-      return 1;
-    }
+    if (leaf !== r.leaf) return { ok: false, reason: `leaf mismatch: attempt ${r.id} does not hash to its stored leaf` };
   }
   const out = rows.map(toExportRow);
   // Spec criterion 14: a raw account name must never be published. Anything that is not a sha256 fails, which covers any *.near or *.testnet.
   const raw = out.filter(r => typeof r.account_hash !== "string" || !HEX64.test(r.account_hash));
-  if (raw.length) {
-    log(`account check failed: account_hash is not a sha256 on ${raw.map(r => r.id).join(", ")}. Nothing was written.`);
-    return 1;
-  }
-  const roots = hourlyRoots(date, out as unknown as LeafInput[]);
+  if (raw.length) return { ok: false, reason: `account check failed: account_hash is not a sha256 on ${raw.map(r => r.id).join(", ")}` };
+  return { ok: true, out, roots: hourlyRoots(date, out as unknown as LeafInput[]) };
+}
 
-  mkdirSync(dir, { recursive: true });
-  const jsonl = join(dir, `attempts-${date}.jsonl`);
-  const rootsFile = join(dir, `roots-${date}.json`);
-  writeFileSync(jsonl, out.map(r => JSON.stringify(r) + "\n").join(""));
-  writeFileSync(rootsFile, JSON.stringify(Object.fromEntries(roots), null, 2) + "\n");
-  // ponytail: pushing these to the public data repo (with DATASET_DEPLOY_KEY) is not built; commit and push the two files by hand
-  log(`wrote ${out.length} rows in ${roots.length} hours:\n  ${jsonl}\n  ${rootsFile}`);
-
-  if (!post) return 0;
-  if (!roots.length) {
-    log(`no attempts on ${date}: no roots to post`);
-    return 0;
-  }
-  // Each day can be written once. Roots already there are fine only if they are ours.
+// Each day can be written once. Roots already there are fine only if they are ours ("differ" otherwise). Throws when the post
+// failed and what is on-chain is not ours.
+export async function postRoots(vault: RootsVault, day: number, roots: [number, string][]): Promise<"posted" | "already" | "differ"> {
   const same = (x: [number, string][]) => JSON.stringify(x) === JSON.stringify(roots);
-  const before = await vault!.getRoots(day);
-  if (before.length) {
-    if (same(before)) {
-      log(`roots for ${date} (day ${day}) are already on-chain and match`);
-      return 0;
-    }
-    log(`roots for ${date} (day ${day}) on-chain differ from this export`);
-    return 1;
-  }
+  const before = await vault.getRoots(day);
+  if (before.length) return same(before) ? "already" : "differ";
   try {
-    await vault!.logAttemptRoots(day, roots);
+    await vault.logAttemptRoots(day, roots);
   } catch (e) {
     // ERR_ROOTS_EXIST from a run in between, or a tx that landed after the wait gave up: done only if what is there is ours
-    if (!same(await vault!.getRoots(day))) {
-      log(`posting roots for ${date} failed: ${(e as Error).message}`);
-      return 1;
-    }
+    if (!same(await vault.getRoots(day))) throw e;
   }
-  log(`posted ${roots.length} roots for ${date} (day ${day})`);
-  return 0;
+  return "posted";
 }
 
 function refuse(log: (s: string) => void, why: string) {

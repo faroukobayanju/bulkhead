@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { main as exportDataset, toExportRow } from "../../scripts/export-dataset";
+import { buildDay, main as exportDataset, toExportRow } from "../../scripts/export-dataset";
+import { makeDb } from "../src/db";
 import { main as verifyRoots, MAINNET_VAULT } from "../../scripts/verify-roots";
 import { attemptLeaf, type LeafInput } from "../../shared/leaf";
 import { epochDay, merkleRoot } from "../../shared/merkle";
@@ -82,6 +83,20 @@ describe("toExportRow", () => {
     expect(row.hidden).toBe(true);
     expect(row.payout).toBeNull(); // a refused row was never paid
     expect(toExportRow({ ...stored, outcome: "drained" }).payout).toBe("tb1qw5…zsx"); // a winner's, shortened, as the public view shows it
+  });
+});
+
+describe("buildDay", () => {
+  test("the build the agent posts from gives the roots and rows the script writes", async () => {
+    await insert({ id: idN(1), ts: `${DATE}T01:00:00.000Z` });
+    await insert({ id: idN(2), ts: `${DATE}T05:30:00.000Z` });
+    await insert({ id: idN(3), ts: "2026-11-03T00:00:00.000Z" }); // the next day
+    expect(await exportDataset(["--date", DATE], ENV, { fetch: convex(), log: () => {}, now: () => AFTER, dir })).toBe(0);
+    const b = await buildDay(makeDb({ fetch: convex(), siteUrl: ENV.CONVEX_SITE_URL, secret: SECRET, pepper: ENV.PEPPER }), DATE);
+    if (!b.ok) throw new Error(b.reason);
+    expect(b.roots.length).toBe(2);
+    expect(Object.fromEntries(b.roots)).toEqual(JSON.parse(readFileSync(files().roots, "utf8")));
+    expect(JSON.parse(JSON.stringify(b.out))).toEqual(readRows());
   });
 });
 
