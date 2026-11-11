@@ -60,6 +60,8 @@ export type ServerDeps = {
     models: Record<Tier, string>;
     tierEnabled: Record<Tier, boolean>;
     judgeModel: string;
+    agentAccount: string; // the account verdicts and vault calls come from: the implicit id in the TEE, "mock" in mock mode
+    tee: boolean; // booted through the TEE flow (src/tee.ts)
   };
   chain: ChainDeps;
   db: AttemptDb;
@@ -442,6 +444,8 @@ export function makeServer(d: ServerDeps) {
       judge_model: d.cfg.judgeModel,
       firewall_version: d.cfg.firewallVersion,
       mock: d.cfg.mock,
+      agent_account: d.cfg.agentAccount,
+      tee: d.cfg.tee,
       // what the model attestation check covers, so nobody reads more into "attested" than the code does
       verification: d.cfg.mock
         ? { verified: [], not_verified: ["mock mode: no attestation performed"] }

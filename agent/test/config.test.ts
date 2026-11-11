@@ -64,6 +64,16 @@ describe("config", () => {
     expect(problems({ ...main, AGENT_PRIVATE_KEY: "ed25519:x" })).toContain("AGENT_PRIVATE_KEY is only allowed");
     expect(problems({ ...mock, MOCK_LLM: "yes" })).toContain("MOCK_LLM must be 0 or 1");
   });
+  test("TEE=1: the agent makes its own account and key, so neither comes from env, and mock is off", () => {
+    const tee = { ...main, AGENT_ACCOUNT: undefined, TEE: "1" };
+    expect(loadConfig(tee)).toMatchObject({ tee: true, agentAccount: "", agentPrivateKey: undefined });
+    expect(loadConfig(main).tee).toBe(false);
+    expect(problems({ ...tee, AGENT_ACCOUNT: "a.near" })).toContain("AGENT_ACCOUNT must be unset when TEE=1");
+    expect(problems({ ...testnet, AGENT_ACCOUNT: undefined, TEE: "1", AGENT_PRIVATE_KEY: "ed25519:x" })).toContain("AGENT_PRIVATE_KEY must be unset when TEE=1");
+    expect(problems({ ...mock, TEE: "1" })).toContain("MOCK_LLM must be off when TEE=1");
+    expect(problems({ ...tee, TEE: "yes" })).toContain("TEE must be 0 or 1");
+    expect(problems({ ...tee, TEE: undefined })).toContain("AGENT_ACCOUNT is required");
+  });
   test("a bad RATE_LIMIT_SCALE stops startup (E22)", () => {
     expect(problems({ ...mock, RATE_LIMIT_SCALE: "0" })).toContain("RATE_LIMIT_SCALE");
     expect(problems({ ...main, RATE_LIMIT_SCALE: "0.1" })).toContain("only allowed when NEAR_NETWORK=testnet");

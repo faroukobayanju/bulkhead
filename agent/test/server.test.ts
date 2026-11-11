@@ -57,7 +57,7 @@ function setup(o: { chain?: Partial<ChainDeps>; deps?: Partial<ServerDeps>; db?:
   };
   const deps: ServerDeps = {
     cfg: {
-      network: "testnet", mock: true, btcHrp: "tb", proxySecret: PROXY, sessionSecret: SESSION, siteUrl: "https://site.test", codehash: "local", firewallVersion: "fw-v1", configSha: "f".repeat(64),
+      network: "testnet", mock: true, btcHrp: "tb", proxySecret: PROXY, sessionSecret: SESSION, siteUrl: "https://site.test", codehash: "local", firewallVersion: "fw-v1", configSha: "f".repeat(64), agentAccount: "mock", tee: false,
       models: { 1: "m", 2: "m", 3: "m" }, tierEnabled: { 1: true, 2: true, 3: true, ...o.tierEnabled }, judgeModel: "j",
     },
     chain,
@@ -110,6 +110,10 @@ describe("simple routes", () => {
     const a: any = await (await s.get("/attestation")).json();
     expect(a).toMatchObject({ codehash: "local", checksum: "f".repeat(64), prompt_sha256: SHA, models: { 1: "m", 2: "m", 3: "m" }, firewall_version: "fw-v1" });
     expect(a.verification.not_verified.length).toBeGreaterThan(0);
+    expect(a).toMatchObject({ agent_account: "mock", tee: false });
+    const base = setup().deps.cfg;
+    const tee: any = await (await setup({ deps: { cfg: { ...base, mock: false, agentAccount: "ab".repeat(32), tee: true } } }).get("/attestation")).json();
+    expect(tee).toMatchObject({ agent_account: "ab".repeat(32), tee: true }); // the web /verify page reads get_agent for this account
   });
   test("unknown route is a 404 envelope with docs_url", async () => {
     const e = await err(await setup().app.request("/nope"));

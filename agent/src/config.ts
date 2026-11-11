@@ -9,6 +9,7 @@ export type Hrp = "bc" | "tb";
 export type Config = {
   network: "testnet" | "mainnet";
   mock: boolean;
+  tee: boolean;
   nearRpc: string;
   vaultAccount: string;
   agentAccount: string;
@@ -51,8 +52,9 @@ export const ENV_DOC: readonly (readonly [name: string, need: string, what: stri
   ["NEAR_NETWORK", "required", "testnet or mainnet"],
   ["NEAR_RPC", "required unless MOCK_LLM", "NEAR JSON-RPC URL"],
   ["VAULT_ACCOUNT", "required unless MOCK_LLM", "the vault contract account, e.g. bulkhead-vault.<team>.testnet"],
-  ["AGENT_ACCOUNT", "required unless MOCK_LLM", "the agent's NEAR account (the verdict signer)"],
-  ["AGENT_PRIVATE_KEY", "testnet only", "ed25519:... key of the agent; in the TEE it comes from the Shade Agent API, never from env"],
+  ["AGENT_ACCOUNT", "required unless MOCK_LLM, unset with TEE", "the agent's NEAR account (the verdict signer)"],
+  ["AGENT_PRIVATE_KEY", "testnet only, unset with TEE", "ed25519:... key of the agent; in the TEE the agent makes its own key and never reads one from env"],
+  ["TEE", "optional", "1 inside the Phala TEE: the agent makes its own implicit account, waits to be funded, registers with the vault by attestation and keeps only a vault-scoped key"],
   ["NEARAI_BASE", "optional, testnet only", "NEAR AI gateway, defaults to config/agent.json (https://cloud-api.near.ai/v1); mainnet refuses any other value"],
   ["NEARAI_API_KEY", "required unless MOCK_LLM", "NEAR AI Cloud key, with a spending limit set in its dashboard"],
   ["TIER_MODEL_1", "optional", "tier 1 model, defaults to config/agent.json and must equal the model the agent calls"],
@@ -125,6 +127,12 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   if (mockRaw !== undefined && mockRaw !== "0" && mockRaw !== "1") bad.push(`MOCK_LLM must be 0 or 1, got "${mockRaw}"`);
   const mock = mockRaw === "1";
   if (mock && nw !== "testnet") bad.push("MOCK_LLM is only allowed when NEAR_NETWORK=testnet");
+  const teeRaw = get("TEE");
+  if (teeRaw !== undefined && teeRaw !== "0" && teeRaw !== "1") bad.push(`TEE must be 0 or 1, got "${teeRaw}"`);
+  const tee = teeRaw === "1";
+  if (tee && mock) bad.push("MOCK_LLM must be off when TEE=1");
+  if (tee && get("AGENT_ACCOUNT") !== undefined) bad.push("AGENT_ACCOUNT must be unset when TEE=1: the agent makes its own account");
+  if (tee && get("AGENT_PRIVATE_KEY") !== undefined) bad.push("AGENT_PRIVATE_KEY must be unset when TEE=1: the agent makes its own key");
   const live = !mock;
   const dev = mock || nw === "testnet";
 
@@ -141,7 +149,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     bad.push((e as Error).message);
   }
 
-  const key = get("AGENT_PRIVATE_KEY");
+  const key = tee ? undefined : get("AGENT_PRIVATE_KEY");
   if (key !== undefined && nw !== "testnet") bad.push("AGENT_PRIVATE_KEY is only allowed when NEAR_NETWORK=testnet (production keys come from the Shade Agent API)");
 
   const tierEnabled = { 1: true, 2: true, 3: true };
@@ -154,9 +162,10 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   const c: Config = {
     network,
     mock,
+    tee,
     nearRpc: need("NEAR_RPC", live),
     vaultAccount: need("VAULT_ACCOUNT", live),
-    agentAccount: need("AGENT_ACCOUNT", live),
+    agentAccount: tee ? "" : need("AGENT_ACCOUNT", live),
     agentPrivateKey: key,
     nearaiBase: get("NEARAI_BASE") ?? cfg.nearai_base,
     nearaiApiKey: need("NEARAI_API_KEY", live),

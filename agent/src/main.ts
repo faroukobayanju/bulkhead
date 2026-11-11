@@ -5,7 +5,7 @@ import { KeyPair } from "near-api-js";
 import cfgJson from "../config/agent.json";
 import { makeViewAccessKey } from "./accesskey";
 import { makeAttest } from "./attest";
-import { makeChainDeps } from "./chain/vault";
+import { keySigner, makeChainDeps, type Signer } from "./chain/vault";
 import { trackCompletion } from "./completions";
 import { loadConfig } from "./config";
 import { makeDb } from "./db";
@@ -17,6 +17,7 @@ import { makeNearAI } from "./nearai";
 import { makeArenaFirewall } from "./pipeline";
 import { RateLimiter } from "./ratelimit";
 import { makeAlert, makeServer, type ChainDeps } from "./server";
+import { bootTee, startRenewal } from "./tee";
 
 export type Started = { http: ReturnType<typeof Bun.serve>; stop: () => Promise<void>; locks: ReadonlySet<number>; lockedBy: ReadonlyMap<number, string> };
 
@@ -33,14 +34,14 @@ export async function start(env: Record<string, string | undefined> = process.en
   for (const t of [1, 2, 3] as const) if (cfg.models[t] !== TIER_MODEL[t]) throw new Error(`TIER_MODEL_${t} differs from the model the agent calls (${TIER_MODEL[t]})`);
   if (cfg.judgeModel !== cfgJson.judge_model) throw new Error(`JUDGE_MODEL differs from the model the agent calls (${cfgJson.judge_model})`);
 
-  // Signing key for verdicts and attempt rows. In the TEE it comes from the Shade Agent API (Task 10), which is not wired: until
-  // then only a testnet key from env, or a throwaway key in mock mode, can sign.
-  const key = cfg.agentPrivateKey ? KeyPair.fromString(cfg.agentPrivateKey as never) : cfg.mock ? KeyPair.fromRandom("ed25519") : null;
-  if (!key) throw new Error("no signing key: set AGENT_PRIVATE_KEY (testnet only); the Shade Agent key source is Task 10");
-  const sign = (h: Uint8Array) => key.sign(h).signature;
-  const signerId = cfg.agentAccount || "mock";
+  // Signing key for verdicts, attempt rows and vault calls: a testnet key from env, or a throwaway key in mock mode. In the TEE
+  // the agent makes its own account and keeps only a vault-scoped key (src/tee.ts), set below once every check has passed.
+  let key = cfg.agentPrivateKey ? KeyPair.fromString(cfg.agentPrivateKey as never) : cfg.mock ? KeyPair.fromRandom("ed25519") : null;
+  if (!key && !cfg.tee) throw new Error("no signing key: set AGENT_PRIVATE_KEY (testnet only) or run in the TEE with TEE=1");
+  let signerId = cfg.agentAccount || "mock";
+  const sign = (h: Uint8Array) => key!.sign(h).signature;
 
-  const db = makeDb({ fetch: f, siteUrl: cfg.convexSiteUrl, secret: cfg.agentSecret, pepper: cfg.pepper, signer: { id: signerId, sign } });
+  const db = makeDb({ fetch: f, siteUrl: cfg.convexSiteUrl, secret: cfg.agentSecret, pepper: cfg.pepper, signer: { get id() { return signerId; }, sign } });
 
   const prompts = loadTierPrompts();
   let chat, judge, attest;
@@ -63,16 +64,27 @@ export async function start(env: Record<string, string | undefined> = process.en
   const viewAccessKey = makeViewAccessKey({ fetch: f, rpcUrl: cfg.nearRpc || "https://rpc.testnet.near.org" });
   let settled = (_t: Tier, _id: string) => {};
   let chain: ChainDeps;
-  let startRebroadcast: ((x: { alert: typeof alert; intervalMs?: number; firstMs?: number; warn?: (what: string, id: string, e: unknown) => void }) => (() => void) & { idle: () => Promise<void> }) | undefined;
-  let pendingPayouts: (() => Promise<{ id: string; tier: Tier }[]>) | undefined;
+  let pending: { id: string; tier: Tier }[] = [];
+  let tee: Awaited<ReturnType<typeof bootTee>> | null = null;
+  let real: ReturnType<typeof makeChainDeps> | undefined;
   if (cfg.mock && !cfg.vaultAccount) {
     chain = (await import("./mock")).mockChain(viewAccessKey);
   } else {
-    const real = makeChainDeps(cfg, { db: db as never, onSettled: (t, id) => settled(t, id), fetch: f, warn: (what, id, e) => log(what, { id, error: (e as Error)?.name ?? "unknown" }) });
+    const build = (account: string, signer?: Signer) => makeChainDeps({ ...cfg, agentAccount: account }, { signer, db: db as never, onSettled: (t, id) => settled(t, id), fetch: f, warn: (what, id, e) => log(what, { id, error: (e as Error)?.name ?? "unknown" }) });
+    // Every check that needs no signature runs before the TEE key swap, so a bad deployment fails before an account is funded.
+    // In the TEE these reads go through a vault whose throwaway key never sends.
+    const pre = build(signerId, cfg.tee ? keySigner(KeyPair.fromRandom("ed25519").toString()) : undefined);
+    // The agent account may hold only vault-scoped keys (scripts/check-agent-key.ts). bootTee checks its own account.
+    if (!cfg.mock && !cfg.tee && !(await pre.keysScoped())) throw new Error(`agent account ${signerId} has keys not scoped to ${cfg.vaultAccount}: refusing to serve`);
+    if (!cfg.mock) await pre.check(); // BASE_RPC must be the chain the Base tier is on
+    pending = await pre.pendingPayouts();
+    if (cfg.tee) {
+      tee = await bootTee({ fetch: f, rpcUrl: cfg.nearRpc, vault: cfg.vaultAccount, log: out });
+      key = tee.key;
+      signerId = tee.account;
+      real = build(signerId, keySigner(tee.key.toString()));
+    } else real = pre;
     chain = { ...real, viewAccessKey };
-    startRebroadcast = real.startRebroadcast;
-    pendingPayouts = real.pendingPayouts;
-    if (!cfg.mock) await real.check(); // BASE_RPC must be the chain the Base tier is on
   }
 
   // Public attempt rows, for ids this process no longer holds: Convex's public query, no secret.
@@ -89,7 +101,7 @@ export async function start(env: Record<string, string | undefined> = process.en
     cfg: {
       network: cfg.network, mock: cfg.mock, btcHrp: cfg.btcHrp, proxySecret: cfg.proxySecret, sessionSecret: cfg.sessionSecret, siteUrl: cfg.siteUrl,
       codehash: cfg.codehash, firewallVersion: cfg.firewallVersion, configSha: createHash("sha256").update(readFileSync(new URL("../config/agent.json", import.meta.url))).digest("hex"),
-      models: cfg.models, tierEnabled: cfg.tierEnabled, judgeModel: cfg.judgeModel,
+      models: cfg.models, tierEnabled: cfg.tierEnabled, judgeModel: cfg.judgeModel, agentAccount: signerId, tee: cfg.tee,
     },
     chain,
     db: Object.assign(db, { getAttempt }),
@@ -115,17 +127,19 @@ export async function start(env: Record<string, string | undefined> = process.en
   });
   settled = server.onSettled;
   // A payout still in flight from before this start keeps its tier shut: the process-local locks are rebuilt from the rows.
-  for (const p of (await pendingPayouts?.()) ?? []) server.adopt(p.tier, p.id);
+  for (const p of pending) server.adopt(p.tier, p.id);
   const http = Bun.serve({ port: o.port ?? cfg.port, fetch: server.app.fetch });
   // E6: the loop runs in this process, because only this process can free the tier lock. Started after the port is taken, so a
   // failed bind leaves no timer behind.
-  const stopRebroadcast = startRebroadcast?.({ alert, intervalMs: o.rebroadcastMs, firstMs: o.rebroadcastFirstMs, warn: (what, id, e) => log(what, { id, error: (e as Error)?.name ?? "unknown" }) });
+  const stopRebroadcast = real?.startRebroadcast({ alert, intervalMs: o.rebroadcastMs, firstMs: o.rebroadcastFirstMs, warn: (what, id, e) => log(what, { id, error: (e as Error)?.name ?? "unknown" }) });
+  const stopRenewal = tee && real ? startRenewal({ fetch: f, account: tee.account, register: real.registerAgent, funds: real.funds, log: out, alert }) : undefined;
   out(JSON.stringify({ event: "listening", port: http.port, mock: cfg.mock, network: cfg.network }));
   return {
     http,
     locks: server.locks,
     lockedBy: server.lockedBy,
     stop: async () => {
+      stopRenewal?.();
       stopRebroadcast?.();
       await stopRebroadcast?.idle(); // a run already going finishes before the server is reported stopped
       await http.stop(true);

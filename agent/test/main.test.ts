@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { loadMock, mockChain } from "../src/mock";
-import { KeyPair } from "near-api-js";
+import { readFileSync } from "node:fs";
+import { KeyPair, transactions, utils } from "near-api-js";
+import { AGENT_METHODS } from "../../scripts/check-agent-key";
 import { start } from "../src/main";
 import { normalize } from "../src/normalize";
 
@@ -47,18 +49,44 @@ const live = {
   ...env, MOCK_LLM: undefined, CONVEX_SITE_URL: "https://x.convex.site", NEAR_RPC: NEAR, VAULT_ACCOUNT: "v.testnet", AGENT_ACCOUNT: "a.testnet",
   AGENT_PRIVATE_KEY: KeyPair.fromRandom("ed25519").toString(), NEARAI_API_KEY: "k", MEMPOOL_BASE: "https://mempool.space/testnet4/api", BASE_RPC: "https://sepolia.base.org", CODEHASH: "cd".repeat(32),
 };
-// Convex answers null, except the payout work list; the NEAR RPC says the vault has no Base tier (so the chain check passes).
-function fakeNet(payouts: unknown[] = []) {
+const scopedKey = { public_key: "ed25519:x", access_key: { nonce: 0, permission: { FunctionCall: { receiver_id: "v.testnet", method_names: AGENT_METHODS, allowance: "1000000000000000000000000" } } } };
+const fixture = JSON.parse(readFileSync(new URL("../../contracts/vault/tests/fixtures/s3-attestation.json", import.meta.url), "utf8"));
+// Convex answers null, except the payout work list. The NEAR RPC lists the agent's keys (vault-scoped unless `keys` says
+// otherwise), funds any account, answers every tx as final, and says the vault has no Base tier (so the chain check passes).
+// A tx's AddKey and DeleteKey change the key list; a key that signs and is not listed is the account's full-access key.
+// dstack and Phala answer with the S3 fixture, for TEE boots.
+const pk = (k: any) => `ed25519:${utils.serialize.base_encode(Uint8Array.from(k.ed25519Key.data))}`;
+function fakeNet(payouts: unknown[] = [], keys: any[] = [scopedKey]) {
   const calls: string[] = [];
-  const f = (async (url: string, init?: RequestInit) => {
+  const f = (async (url: string, init?: any) => {
     const u = String(url);
     calls.push(u);
-    if (u.startsWith(NEAR)) return new Response(JSON.stringify({ jsonrpc: "2.0", id: "x", result: { error: "wasm execution failed: Smart contract panicked: ERR_BAD_TIER", logs: [] } }));
+    if (u.startsWith("http://localhost/")) return Response.json(u.endsWith("/Info") ? { tcb_info: JSON.stringify(fixture.tcb_info) } : { quote: Buffer.from(fixture.quote).toString("hex") });
+    if (u.startsWith("https://cloud-api.phala.network/")) return Response.json({ quote_collateral: fixture.collateral });
+    if (u.startsWith(NEAR)) {
+      const { method, params } = JSON.parse(init.body);
+      const ok = (result: unknown) => Response.json({ jsonrpc: "2.0", id: "x", result });
+      if (params?.request_type === "view_access_key_list") return ok({ keys });
+      if (params?.request_type === "view_account") return ok({ amount: (10n ** 24n).toString() });
+      if (params?.request_type === "view_access_key") return ok({ nonce: 1, block_hash: utils.serialize.base_encode(new Uint8Array(32)), block_height: 1 });
+      if (method === "broadcast_tx_async") {
+        const t: any = transactions.SignedTransaction.decode(Buffer.from(params[0], "base64")).transaction;
+        if (!keys.some(k => k.public_key === pk(t.publicKey))) keys.push({ public_key: pk(t.publicKey), access_key: { nonce: 0, permission: "FullAccess" } });
+        for (const a of t.actions) {
+          const fc = a.addKey?.accessKey.permission.functionCall;
+          if (fc) keys.push({ public_key: pk(a.addKey.publicKey), access_key: { nonce: 0, permission: { FunctionCall: { receiver_id: fc.receiverId, method_names: fc.methodNames, allowance: fc.allowance.toString() } } } });
+          if (a.deleteKey) keys.splice(keys.findIndex(k => k.public_key === pk(a.deleteKey.publicKey)), 1);
+        }
+        return ok("h");
+      }
+      if (method === "tx") return ok({ final_execution_status: "FINAL", status: { SuccessValue: "" } });
+      return ok({ error: "wasm execution failed: Smart contract panicked: ERR_BAD_TIER", logs: [] });
+    }
     const op = /\/agent\/(\w+)/.exec(u)?.[1];
     void init;
     return new Response(JSON.stringify({ result: op === "attempts_payouts" ? payouts : null }));
   }) as unknown as typeof fetch;
-  return { f, calls };
+  return { f, calls, keys };
 }
 const payoutRow = (id: string, tier: number, outcome: string) => ({ id, tier, outcome, ts: "2026-11-03T12:00:00.000Z", near_tx: null, release_tx: null, release_ref_height: null });
 
@@ -132,6 +160,28 @@ describe("start()", () => {
     const base = { ...live, AGENT_PRIVATE_KEY: undefined };
     await expect(start({ ...base, CODEHASH: undefined }, () => {}, NS)).rejects.toThrow("CODEHASH is required");
     await expect(start(base, () => {}, NS)).rejects.toThrow("no signing key");
+  });
+  test("outside mock mode an agent account with a key that is not vault-scoped stops startup", async () => {
+    await expect(start(live, () => {}, { ...NS, fetch: fakeNet([], [{ public_key: "ed25519:x", access_key: { nonce: 0, permission: "FullAccess" } }]).f })).rejects.toThrow("not scoped to v.testnet");
+  });
+  test("TEE=1 boots its own implicit account, serves as it and says so on /attestation", async () => {
+    const lines: string[] = [];
+    const tee = { ...live, AGENT_ACCOUNT: undefined, AGENT_PRIVATE_KEY: undefined, TEE: "1" };
+    const net = fakeNet([], []);
+    const { http, stop } = await start(tee, l => void lines.push(l), { ...NS, fetch: net.f, rebroadcastFirstMs: 600_000, rebroadcastMs: 600_000 });
+    try {
+      const account = JSON.parse(lines[0]!).account;
+      // only S is left: a FunctionCall key for the vault's agent methods, 1 NEAR, and not F (whose bytes are the account id)
+      expect(net.keys.length).toBe(1);
+      expect(net.keys[0].access_key.permission).toEqual({ FunctionCall: { receiver_id: "v.testnet", method_names: AGENT_METHODS, allowance: (10n ** 24n).toString() } });
+      expect(Buffer.from(utils.PublicKey.from(net.keys[0].public_key).data).toString("hex")).not.toBe(account);
+      expect(JSON.parse(lines[0]!)).toEqual({ event: "tee_fund_me", account });
+      const a: any = await (await fetch(`http://localhost:${http.port}/attestation`, { headers: { "x-bulkhead-proxy-secret": S("d") } })).json();
+      expect(a).toMatchObject({ agent_account: account, tee: true });
+      expect(account).toMatch(/^[0-9a-f]{64}$/);
+    } finally {
+      await stop();
+    }
   });
   test("refuses bad config and a model the agent does not call", async () => {
     await expect(start({ ...env, PEPPER: "short" }, () => {}, NS)).rejects.toThrow("PEPPER must be at least 32 bytes");

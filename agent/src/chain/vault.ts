@@ -16,6 +16,7 @@ import { GAS_LIMIT, assembleSigned as assembleEvm } from "./base";
 import { assembleSigned as assembleBtc, inputsOf, makeBtc, pickUtxo, tierAddress, tierPubkey, type Btc } from "./btc";
 import { amountOfTx, makeBase, nonceOfTx } from "./base";
 import { startRebroadcast, type Payout } from "./rebroadcast";
+import { AGENT_METHODS, keysAreScoped, type AccessKeyInfo } from "../../../scripts/check-agent-key";
 
 const RELEASE_GAS = 300n * 10n ** 12n; // E14b: never max gas, it reserves more than the key's allowance
 const ROOTS_GAS = 30n * 10n ** 12n;
@@ -130,12 +131,12 @@ export function makeVault(o: VaultOpts) {
   // One transaction at a time from the agent key, so two calls cannot pick the same nonce.
   let lock: Promise<unknown> = Promise.resolve();
   let lastNonce = 0;
-  function send(method: string, args: unknown, gas: bigint, onHash?: (h: { hash: string; refHeight: number }) => Promise<void>): Promise<string> {
+  function sendActions(receiver: string, actions: transactions.Action[], onHash?: (h: { hash: string; refHeight: number }) => Promise<void>): Promise<string> {
     const run = async () => {
       const pub = utils.PublicKey.from(o.signer.publicKey);
       const key = await rpc("query", { request_type: "view_access_key", finality: "optimistic", account_id: o.agentAccount, public_key: o.signer.publicKey });
       const nonce = Math.max(Number(key.nonce), lastNonce) + 1;
-      const tx = transactions.createTransaction(o.agentAccount, pub, o.vaultAccount, nonce, [transactions.functionCall(method, Buffer.from(JSON.stringify(args)), gas, 0n)], utils.serialize.base_decode(key.block_hash));
+      const tx = transactions.createTransaction(o.agentAccount, pub, receiver, nonce, actions, utils.serialize.base_decode(key.block_hash));
       const bytes = transactions.encodeTransaction(tx);
       const digest = createHash("sha256").update(bytes).digest();
       const signature = new transactions.Signature({ keyType: pub.keyType, data: await o.signer.sign(digest) });
@@ -150,6 +151,8 @@ export function makeVault(o: VaultOpts) {
     lock = p.catch(() => {});
     return p;
   }
+  const send = (method: string, args: unknown, gas: bigint, onHash?: (h: { hash: string; refHeight: number }) => Promise<void>, deposit = 0n) =>
+    sendActions(o.vaultAccount, [transactions.functionCall(method, Buffer.from(JSON.stringify(args)), gas, deposit)], onHash);
 
   // The `tx` result once final. Unknown or timed-out polls keep waiting until the deadline.
   async function waitFinal(hash: string): Promise<any> {
@@ -373,6 +376,37 @@ export function makeVault(o: VaultOpts) {
     return r?.permission === "FullAccess";
   }
 
+  // TEE registration (and renewal, deposit 0). A panic throws its ERR_ string, with the contract's reason after the colon.
+  async function registerAgent(attestation: unknown, depositYocto: bigint): Promise<void> {
+    const r = await waitFinal(await send("register_agent", { attestation }, RELEASE_GAS, undefined, depositYocto));
+    if (r.status?.Failure) throw new ContractRefusedError(JSON.stringify(r.status.Failure).match(/Smart contract panicked: (ERR_[A-Z0-9_]+(?::[^"\\]*)?)/)?.[1] ?? "register_agent failed on-chain");
+  }
+  // One tx, so it is atomic: add the scoped key, delete the key that signs it (the full-access key at TEE boot).
+  async function scopeKeys(scopedPublicKey: string, allowanceYocto: bigint): Promise<void> {
+    const actions = [
+      transactions.addKey(utils.PublicKey.from(scopedPublicKey), transactions.functionCallAccessKey(o.vaultAccount, AGENT_METHODS, allowanceYocto)),
+      transactions.deleteKey(utils.PublicKey.from(o.signer.publicKey)),
+    ];
+    const r = await waitFinal(await sendActions(o.agentAccount, actions));
+    if (r.status?.Failure) throw new Error("key rotation failed on-chain");
+  }
+  const accessKeys = async (): Promise<AccessKeyInfo[]> => (await rpc("query", { request_type: "view_access_key_list", finality: "final", account_id: o.agentAccount })).keys;
+  // The agent account's balance in yoctoNEAR; 0 while the account does not exist yet.
+  async function balance(): Promise<bigint> {
+    try {
+      return BigInt((await rpc("query", { request_type: "view_account", finality: "final", account_id: o.agentAccount })).amount);
+    } catch (e) {
+      if (e instanceof RpcError && e.causeName === "UNKNOWN_ACCOUNT") return 0n;
+      throw e;
+    }
+  }
+
+  // The signing key's allowance left (a FunctionCall key; 0 for any other) and the account balance.
+  async function funds(): Promise<{ allowance: bigint; balance: bigint }> {
+    const k = await rpc("query", { request_type: "view_access_key", finality: "final", account_id: o.agentAccount, public_key: o.signer.publicKey });
+    return { allowance: BigInt(k?.permission?.FunctionCall?.allowance ?? 0), balance: await balance() };
+  }
+
   async function logAttemptRoots(day: number, roots: [number, string][]): Promise<void> {
     const hash = await send("log_attempt_roots", { day, roots }, ROOTS_GAS);
     const r = await waitFinal(hash);
@@ -386,6 +420,11 @@ export function makeVault(o: VaultOpts) {
     wasSigned,
     viewAccessKey,
     logAttemptRoots,
+    registerAgent,
+    scopeKeys,
+    accessKeys,
+    balance,
+    funds,
     getRoots: (day: number): Promise<[number, string][]> => vaultView("get_roots", { day }),
     getTier,
     recoverSigned,
@@ -396,7 +435,7 @@ export function makeVault(o: VaultOpts) {
 export type Vault = ReturnType<typeof makeVault>;
 
 // The ChainDeps of server.ts, built from the agent's config (src/main.ts calls this). The signing key is the testnet
-// AGENT_PRIVATE_KEY; in the TEE the Shade Agent API supplies a `signer` instead (Task 10).
+// AGENT_PRIVATE_KEY; in the TEE the agent's own scoped key comes in as `signer` (src/tee.ts).
 type PayoutRow = { id: string; tier: 1 | 2 | 3; outcome: string; ts: string; near_tx: string | null; release_tx: string | null; release_ref_height: number | null };
 type ChainDb = {
   putSignedTx(r: { attempt_id: string; chain: "btc" | "evm"; hex: string }): Promise<boolean>;
@@ -468,6 +507,10 @@ export function makeChainDeps(cfg: Config, x: { db: ChainDb; onSettled: (t: Tier
     storeSignedTx: async (attemptId: string, chain: "btc" | "evm", hex: string) => void (await x.db.putSignedTx({ attempt_id: attemptId, chain, hex })),
     logAttemptRoots: vault.logAttemptRoots,
     getRoots: vault.getRoots,
+    registerAgent: vault.registerAgent,
+    funds: vault.funds,
+    /** Every key on the agent account may only call the vault's agent methods (scripts/check-agent-key.ts). */
+    keysScoped: async () => keysAreScoped(await vault.accessKeys(), cfg.vaultAccount),
     /** The attempts a restart must treat as holding their tier: rows still `releasing` or `signed_pending_broadcast`. */
     pendingPayouts: pending,
     /** Startup check: BASE_RPC is the chain the Base tier is on. Throws on a mismatch; a vault with no Base tier passes. */
