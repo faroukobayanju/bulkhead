@@ -59,3 +59,14 @@ scripts/test-contracts.sh
 ```
 
 That builds the test wasm and runs every unit and sandbox test. To deploy your own vault on testnet, see `docs/deploy-your-vault.md`.
+
+## Rebuild the mainnet wasm yourself
+
+The mainnet vault is built inside a pinned Docker image (`sourcescan/cargo-near:0.21.1-rust-1.96.0`, set in `contracts/vault/Cargo.toml`), with no features: no stub, 24 h timelock. You need Docker and `cargo-near`, but not clang.
+
+```bash
+cd contracts/vault
+cargo near build reproducible-wasm
+```
+
+The build records the git commit it came from inside the wasm (`git+https://github.com/faroukobayanju/bulkhead?rev=<commit>`), so each commit gives its own hash, and the same commit always gives the same bytes. To check a deployed vault, build the commit named in its wasm, then run `bun scripts/check-mainnet-wasm.ts <wasm> --vault <account>`: it compares your build's hash with the vault's on-chain `code_hash`.
