@@ -109,6 +109,61 @@ Field names for `attest.ts`:
 
 `GET /v1/signature/<chat_id>?model=<id>&signing_algo=ecdsa` returned 200 on all four models, with keys `text`, `signature`, `signing_address`, `signing_algo`, `signature_kind`. On the TEE models `text` starts with the model ID. This spike did not verify the signatures. Task 9 must verify them against the attested `signing_address`.
 
-## S3: Shade Agent template
+## S3: Shade Agent template (run 2026-11-11)
 
-Owner: @haikeysgit. Not recorded yet.
+Owner: @haikeysgit. Result: **the template agent registered on testnet twice: in local mode, and from a real Phala TDX CVM with an attestation the contract verified.** The TEE run needed a manual Phala deploy, because the Shade CLI cannot deploy to any OS image Phala still allows (see Blockers).
+
+| Item | Value |
+|---|---|
+| Template | https://github.com/NearDeFi/shade-agent-template, commit `816b75bc0423addcbb3b1362026b33f2ddd5c973` |
+| Versions | `@neardefi/shade-agent-cli` 2.4.0, `@neardefi/shade-agent-js` 2.2.0, `shade-attestation` 0.2.0, near-sdk 5.26.1 (the vault uses 5.30) |
+| Agent contract | `s3.simple-native.testnet`, owner `simple-native.testnet`, signer `v1.signer-prod.testnet`, attestation valid for 7 days |
+| Image | `haikeys/bulkhead-s3@sha256:0e597b12447cc9e4fc8b92f325ec79286a3f2dc6a60bc2b24326ebf395a6e174` (Docker Hub, public) |
+| CVM | Phala Cloud, `tdx.small`, dstack 0.5.12, Phala KMS, public logs on |
+| TEE agent | `29dfb11751d74844bcd05306e6387ef264541f8be6d938925207a1f0af9749a1`, PPID `62d54040cb9dfc08bb13006fa75ece56`, `validity: Valid` |
+
+### How the contract decides an agent is allowed
+
+There is no single codehash. The owner approves two lists, and `register_agent(attestation)` checks the agent against both:
+
+- **Measurements:** `mrtd`, `rtmr0`, `rtmr1`, `rtmr2` from the TDX quote, the digest of the `key-provider` event (RTMR3), and `tcb_info.compose_hash`. The compose hash covers the docker-compose file, so it pins the image digest. Changing the image, the OS version or the KMS gives new measurements.
+- **PPIDs:** the 16-byte platform ID of the TDX machine.
+
+The agent's account ID is the first 32 bytes of the quote's report data, so it must be an implicit (64-hex) account. A registration expires after 7 days; the template re-registers every 6.
+
+### What we did
+
+1. Local mode (`requires_tee: false`): `shade deploy`, `npm run dev`, `shade whitelist`. The agent registered with all-zero measurements and PPID.
+2. TEE mode: the CLI built and pushed the image, then deployed the contract (`requires_tee: true`). Its Phala step failed (see Blockers).
+3. We deployed the same compose from the Phala dashboard with dstack 0.5.12. The agent booted and called `register_agent`, which failed because no 0.5.12 measurements were approved. Its arguments carry the full attestation, so we read the measurements from the failed transaction (`FBYSMB79Ger4syPCH2X9q2j6BsS4DR2ydU71fa9ToCh9`), approved them as owner, and the next attempt registered.
+
+Approved 0.5.12 measurements for this compose:
+
+```json
+{
+  "rtmrs": {
+    "mrtd": "7fe60787222bd394cb516abca2435f22f035ab2cc9c0a4b4b3b148e46297f3d931a237b72f359052c6e657d8c1409173",
+    "rtmr0": "68102e7b524af310f7b7d426ce75481e36c40f5d513a9009c046e9d37e31551f0134d954b496a3357fd61d03f07ffe96",
+    "rtmr1": "4ae609807c765916a31d724786ed74bcb97e168a9d937b04936aeef2015c907eba5ac352c6bcd749c246fd62ffb659ec",
+    "rtmr2": "764489f277a8540189761e72b4238ba36d4d647e11bd958d8ab5522af2a4867b0ff63e06b0c4967f1857236244040a5d"
+  },
+  "key_provider_event_digest": "1de9cfa982eab350c1c6719fed6f35f9be554d202c26d354e498b0b9e6ad2e6e1e02df3abfa85bd8113c9ea219c16deb",
+  "app_compose_hash_payload": "b4e628a4eb5c3fb110c32b15efa4769e7fd58e74665ad2120841233b02a0620f"
+}
+```
+
+### Blockers and fixes
+
+- **The CLI only knows dstack 0.5.7 and 0.5.8.** Phala now offers 0.5.12 and 0.6.1, and its KMS rejects 0.5.8 (`OS image dstack-0.5.8-6427f4f5 … is not allowed by phala KMS`). Fix used: deploy from the dashboard, then approve the measurements read from the agent's own attestation, as above. Approving them is an owner action, so in the vault it goes through the 24 h timelock (Task 10).
+- **`approve_ppids` fails with the CLI's list.** Phala's list includes `""` and three 64-byte entries; the contract's `Ppid` is exactly 16 bytes, so the whole call fails to deserialize. We approved the 23 valid 16-byte entries ourselves.
+- **`shade-agent-js` 2.2.0 local mode always fails its key check** with the default `numKeys: 1`: an empty list of extra keys counts as "random", which disagrees with local mode's path-derived key. Workaround: `numKeys: 2`.
+- **Registration needs about 0.31 NEAR free** (prepaid gas plus the 486-byte storage deposit), but the template funds the agent with 0.3 and only at boot. Each failed attempt costs about 0.02 NEAR, so a misconfigured agent soon stops retrying. Fund it with at least 0.6 NEAR.
+- **The CLI runs `sudo docker` on Linux**, so Docker Hub needs `sudo docker login`, not only `docker login`.
+- **Wiping an existing contract account failed** on storage. Deleting the account and letting the CLI recreate it worked.
+- **WSL could not resolve `test.rpc.fastnear.com`** at times (`EAI_AGAIN`). `NODE_OPTIONS=--dns-result-order=ipv4first` and a hosts entry fixed it; this is local to one machine.
+
+### For Task 10
+
+- Approval goes by measurements plus PPID, not by codehash. E1's `approve_codehash` becomes approve-measurements, behind the same 24 h timelock, and the vault also needs the PPID list.
+- Use the approve-from-the-attestation flow above until the CLI supports a current dstack version. Any change to the image or the compose needs new measurements.
+- Merging `shade-attestation` 0.2.0 means building it with the vault's near-sdk 5.30; check that before relying on it.
