@@ -1,12 +1,14 @@
-// Check that an agent account can only call the vault, and only its two agent methods.
+// Check that an agent account can only call the vault, and only its three agent methods.
 //
 //   bun scripts/check-agent-key.ts <agent-account> --vault <vault-account> [--rpc <url>]
 //
 // Exits 0 only when every access key on the agent account is a FunctionCall key
-// for the vault, limited to release_funds and log_attempt_roots, with an allowance
-// of at most 1 NEAR. The agent runs the same check on itself before serving.
+// for the vault, limited to release_funds, log_attempt_roots and register_agent,
+// with an allowance of at most 1 NEAR. register_agent is there because a TEE
+// attestation expires after 7 days and the agent must renew it with this key.
+// The agent runs the same check on itself before serving.
 
-export const AGENT_METHODS = ["log_attempt_roots", "release_funds"];
+export const AGENT_METHODS = ["log_attempt_roots", "register_agent", "release_funds"];
 const MAX_ALLOWANCE = 10n ** 24n; // 1 NEAR in yoctoNEAR
 const TESTNET_RPC = "https://rpc.testnet.fastnear.com";
 
