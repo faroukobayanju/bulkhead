@@ -98,6 +98,10 @@ export function loginCopy(code: string, network: Network = "testnet"): string {
       return "No NEAR wallet found. Install Meteor Wallet, or use MyNearWallet in a new tab.";
     case "rejected":
       return "You rejected the signature, so you are not signed in.";
+    case "popup_blocked":
+      return "Your browser blocked the wallet's pop-up window. Allow pop-ups for this site, then sign in again.";
+    case "wallet_loading":
+      return "The wallets are still loading. Try again in a second.";
     case "expired":
     case "replay":
       return "That sign-in is too old. Please sign again.";

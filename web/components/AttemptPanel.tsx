@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { parsePayee } from "../../agent/src/address";
 import { MAX_MESSAGE, STAGES } from "../../shared/attempt";
 import { CHAIN_OF, type Network, type TierId } from "@/lib/links";
-import { CONSENT_VERSION, LoginError, consented, forgetSession, mockSignIn, saveConsent, savedSession, signIn, type Session, type WalletId } from "@/lib/near";
+import { CONSENT_VERSION, LoginError, consented, forgetSession, mockSignIn, prepareWallets, saveConsent, savedSession, signIn, type Session, type WalletId, type Wallets } from "@/lib/near";
 import { loginCopy, pendingScreen, screenFor, type Screen } from "@/lib/outcome";
 import { Countdown } from "./Countdown";
 import { LiveStage, convexLive } from "./Live";
@@ -50,6 +50,18 @@ export function AttemptPanel({ tier, network, mock, open, closedReason }: { tier
     setMessage(localStorage.getItem(draftKey) ?? "");
     setPayout(localStorage.getItem(payoutKey) ?? "");
   }, [draftKey, payoutKey]);
+  // The wallet selector is set up now, not at click time, so the signing click can open the wallet's popup (lib/near.ts).
+  const [wallets, setWallets] = useState<Wallets | null>(null);
+  useEffect(() => {
+    if (mock) return;
+    let live = true;
+    prepareWallets(network)
+      .then(w => live && setWallets(w))
+      .catch(() => live && setWallets({}));
+    return () => {
+      live = false;
+    };
+  }, [mock, network]);
   useEffect(() => localStorage.setItem(draftKey, message), [draftKey, message]);
   useEffect(() => localStorage.setItem(payoutKey, payout), [payoutKey, payout]);
 
@@ -66,7 +78,7 @@ export function AttemptPanel({ tier, network, mock, open, closedReason }: { tier
     setSigning(true);
     try {
       saveConsent();
-      setSession(w === "mock" ? await mockSignIn() : await signIn(w, network));
+      setSession(w === "mock" ? await mockSignIn() : await signIn(w, wallets));
     } catch (e) {
       setLoginErr(loginCopy(e instanceof LoginError ? e.code : "unknown", network));
     } finally {
@@ -160,10 +172,10 @@ export function AttemptPanel({ tier, network, mock, open, closedReason }: { tier
               </button>
             ) : (
               <>
-                <button type="button" className="btn" disabled={signing} onClick={() => doSignIn("meteor-wallet")}>
+                <button type="button" className="btn" disabled={signing || wallets === null} onClick={() => doSignIn("meteor-wallet")}>
                   Meteor Wallet
                 </button>
-                <button type="button" className="btn ghost" disabled={signing} onClick={() => doSignIn("my-near-wallet")}>
+                <button type="button" className="btn ghost" disabled={signing || wallets === null} onClick={() => doSignIn("my-near-wallet")}>
                   MyNearWallet
                 </button>
               </>
