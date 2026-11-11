@@ -32,7 +32,14 @@ In the Phala dashboard, create a CVM:
 - Paste the compose file.
 - Set the encrypted env values: `NEARAI_API_KEY`, `CONVEX_URL`, `CONVEX_SITE_URL`, `AGENT_SECRET`, `PEPPER`, `SESSION_SECRET`, `PROXY_SECRET`, `ALERT_WEBHOOK_URL` (may be empty). They must match Convex and the web deploy.
 
-The Shade CLI cannot deploy to dstack 0.5.12 (see `docs/spikes.md`, S3), so use the dashboard.
+The Shade CLI cannot deploy to dstack 0.5.12 (see `docs/spikes.md`, S3). Use the dashboard, or the Phala CLI through `scripts/phala-deploy.sh`, which sends only these secrets from your `.env`:
+
+```bash
+bash scripts/phala-deploy.sh --dry-run          # lists the keys it would send
+PHALA_API_KEY=<token> bash scripts/phala-deploy.sh
+```
+
+If the CLI rejects `--image dstack-0.5.12`, pick 0.5.12 in the dashboard instead.
 
 ## 4. Approve the CVM's measurements (owner, 24 h timelock)
 
