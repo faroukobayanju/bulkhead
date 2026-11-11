@@ -10,10 +10,11 @@ You need a Linux or macOS shell (on Windows, use WSL) with:
 
 - Rust from https://rustup.rs. The repo pins the version in `rust-toolchain.toml`.
 - `cargo install --locked cargo-near`
+- clang (`sudo apt install clang` on Ubuntu). The TEE attestation check uses `ring`, which needs clang to build for wasm.
 - `cargo install --locked near-cli-rs`
 - Bun from https://bun.sh, then run `bun install` in the repo root.
 
-You also need a NEAR testnet account with at least 5 NEAR. The faucet creates one:
+You also need a NEAR testnet account with at least 10 NEAR. A new faucet account has exactly that:
 
 ```bash
 near account create-account sponsor-by-faucet-service <you>.testnet autogenerate-new-keypair save-to-legacy-keychain network-config testnet create
@@ -29,7 +30,7 @@ bun scripts/deploy-vault.ts --owner <you>.testnet --max-sats 100000 --cooldown 3
 
 | Flag | Meaning |
 |---|---|
-| `--owner` | Your testnet account. It pays 4 NEAR to create the vault and owns it. |
+| `--owner` | Your testnet account. It pays 9 NEAR to create the vault and owns it. Most of it is storage for the ~800 KB contract. |
 | `--max-sats` | Spending cap: the most one release can move, in sats. |
 | `--cooldown` | Seconds between two releases, at most 30 days. |
 | `--rounds` | How many releases the tier allows before it is drained, 1 to 255. |
@@ -54,5 +55,5 @@ It stops at the first error.
 ## Limits
 
 - **Testnet only.** The script refuses `.near` accounts.
-- **Stub agent registration.** This build includes the dev-only `register_agent_stub`, so the owner can register any agent. Real agents register through Shade attestation (Task 10), and mainnet builds never include the stub.
+- **Stub agent registration.** This build includes the dev-only `register_agent_stub`, so the owner can register any agent. Real agents call `register_agent` from inside their TEE with a Phala attestation, which the vault checks against owner-approved measurements and PPIDs. Mainnet builds never include the stub.
 - **Bitcoin tiers only.** Base (USDC) tiers need `evm` settings in `configure_tier` and are not covered by this script yet.

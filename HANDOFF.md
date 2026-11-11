@@ -31,11 +31,12 @@ Building is allowed now (HACKATHON.md Q-001: eligible work starts 2026-10-19).
 - **Spike S1 done on testnet (2026-11-02), see `docs/spikes.md`:** the vault signed Bitcoin testnet4 payout `a8ecea7c…8b1a` through `v1.signer-prod.testnet`, and Bitcoin rejected the same payout signed with a false input amount. How the agent assembles and broadcasts the tx is written up there, with reference code in `scripts/spike-s1/`.
 - **Do not deploy to mainnet:** the contract has had no review yet.
 - **Spike S3 done on testnet (2026-11-11), see `docs/spikes.md`:** the template agent registered from a real Phala TDX CVM. Approval is by measurements plus PPID, not codehash, and the Shade CLI cannot deploy to a current dstack image, so measurements are approved from the agent's own attestation.
-- **Next:** Task 10. Agents attach 300 TGas, never max gas (E14b).
+- **Task 10 contract part done (branch `a/task-10-register`):** the vault verifies the agent's Phala TDX attestation in `register_agent(attestation)`, using `shade-attestation` 0.2.0 vendored in `contracts/shade-attestation`. The owner approves measurements and PPIDs through the 24 h timelock (`propose_*`, `approve_*`); removing either stops agents at once. A registration lasts 7 days and the agent renews it with its function-call key, so that key allows `release_funds`, `log_attempt_roots` and `register_agent` (`scripts/check-agent-key.ts`). Building the vault now needs clang.
+- **Next:** Task 10 steps 4 and 5 with Person B: key setup inside the TEE, then the Phala deploy. Agents attach 300 TGas, never max gas (E14b).
 - **Choices already made:** Rust pinned to 1.96 because near-sdk 5.30 needs a newer compiler. `ReleasePayload` was added in Task 3, ahead of Task 4.
 
 ## Interface freeze (end of day 2), owned jointly
-- Contract call: `release_funds(tier_id, attempt_id, recipient, payload)` (Tasks 3 and 4), authorization by approved codehash (E1), and the cap fields and errors `ERR_OVER_CAP` / `ERR_COOLDOWN` (E14).
+- Contract call: `release_funds(tier_id, attempt_id, recipient, payload)` (Tasks 3 and 4), authorization by a registered agent with approved measurements and PPID (E1, Task 10), and the cap fields and errors `ERR_OVER_CAP` / `ERR_COOLDOWN` (E14).
 - Agent registration and attestation check (Task 10).
 - Attempt row schema (`convex/schema.ts`; Task 15 E6/E7/E8/E20).
 - HTTP contract between web and agent (Task 9 routes + E12 proxy routes).

@@ -36,7 +36,7 @@ async fn setup() -> anyhow::Result<(
     owner.call(vault.id(),"configure_tier")
         .args_json(json!({"id":1,"chain":"Bitcoin","derivation_path":"bulkhead-tier-1","address":BTC_TO,"max_release":"100000","cooldown_s":3600,"rounds":2}))
         .transact().await?.into_result()?;
-    owner.call(vault.id(),"register_agent_stub").args_json(json!({"account":full.id(),"codehash":"abc"})).transact().await?.into_result()?;
+    owner.call(vault.id(),"register_agent_stub").args_json(json!({"account":full.id()})).transact().await?.into_result()?;
 
     let sk = SecretKey::from_random(near_workspaces::types::KeyType::ED25519);
     full.batch(full.id())

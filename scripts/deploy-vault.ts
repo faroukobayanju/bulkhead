@@ -9,8 +9,6 @@ import { configureTierArgs, derivedKeyCommand, initArgs, isExpiredTx, parseArgs,
 
 const REPO = new URL("..", import.meta.url).pathname;
 const WASM = `${REPO}contracts/target/near/bulkhead_vault/bulkhead_vault.wasm`;
-// Dev-only agent registration until Task 10 lands the Shade attestation path.
-const STUB_CODEHASH = "testnet-stub";
 
 function run(cmd: string[], cwd = REPO): string {
   // Testnet RPC sometimes reports a fresh transaction as expired; it never ran, so resend it.
@@ -52,9 +50,9 @@ function main() {
   run(["cargo", "near", "build", "non-reproducible-wasm", "--no-abi", "--features", "stub-attestation", "--out-dir", "../target/near/bulkhead_vault"],
     `${REPO}contracts/vault`);
 
-  // The ~290 KB wasm needs about 2.9 NEAR of storage; the rest pays for state.
-  console.log(`2/5 creating ${o.vault} (4 NEAR from ${o.owner})`);
-  send("account", "create-account", "fund-myself", o.vault, "4 NEAR", "autogenerate-new-keypair", "save-to-legacy-keychain", "sign-as", o.owner);
+  // The ~800 KB wasm (TDX quote checks included) needs about 8.1 NEAR of storage; the rest pays for state.
+  console.log(`2/5 creating ${o.vault} (9 NEAR from ${o.owner})`);
+  send("account", "create-account", "fund-myself", o.vault, "9 NEAR", "autogenerate-new-keypair", "save-to-legacy-keychain", "sign-as", o.owner);
 
   console.log(`3/5 deploying and initialising with signer ${TESTNET_SIGNER}`);
   send("contract", "deploy", o.vault, "use-file", WASM, "with-init-call", "new", "json-args", JSON.stringify(initArgs(o.owner)),
@@ -68,7 +66,7 @@ function main() {
 
   console.log(`5/5 configuring tier ${o.tier} and registering agent ${o.agent}`);
   call(o, "configure_tier", configureTierArgs(o, address));
-  call(o, "register_agent_stub", { account: o.agent, codehash: STUB_CODEHASH });
+  call(o, "register_agent_stub", { account: o.agent });
 
   console.log(`
 Vault ready: ${o.vault} (owner ${o.owner})
