@@ -5,7 +5,7 @@ import attempts from "../fixtures/attempts.json";
 import attestation from "../fixtures/attestation.json";
 import session from "../fixtures/session.json";
 
-export type AgentEnv = { AGENT_URL?: string; PROXY_SECRET?: string; MOCK_AGENT?: string };
+export type AgentEnv = { AGENT_URL?: string; PROXY_SECRET?: string; MOCK_AGENT?: string; VERCEL?: string; TRUSTED_IP_HEADER?: string };
 type Opts = { env?: AgentEnv; fetch?: typeof fetch; now?: () => number };
 
 const MAX_BODY = 16 * 1024; // the agent's own bodyLimit
@@ -15,10 +15,12 @@ const TIMEOUT_MS = 30_000;
 const err = (status: number, code: string, message: string, extra: Record<string, unknown> = {}) =>
   Response.json({ error: { code, message, ...extra } }, { status, headers: { "cache-control": "no-store" } });
 
-// Vercel sets x-real-ip itself and overwrites what the client sent. ponytail: off Vercel, put a proxy in front that does the same,
-// or the agent's per-IP limits trust whatever the client wrote.
-export function clientIp(h: Headers): string | null {
-  return h.get("x-real-ip")?.trim() || h.get("x-forwarded-for")?.split(",")[0]?.trim() || null;
+// Only a header our own edge sets can be believed: on Vercel that is x-real-ip (Vercel overwrites what the client sent); behind
+// another proxy, TRUSTED_IP_HEADER names the header it overwrites. Anything else is client-written, so no IP is sent and the
+// agent refuses the request (bad_client_ip). x-forwarded-for is never used: clients can prepend to it.
+export function clientIp(h: Headers, env: AgentEnv = process.env): string | null {
+  const name = env.TRUSTED_IP_HEADER?.trim().toLowerCase() || (env.VERCEL ? "x-real-ip" : null);
+  return (name && h.get(name)?.trim()) || null;
 }
 
 export async function callAgent(path: string, o: Opts & { method?: string; body?: string; ip?: string | null } = {}): Promise<Response> {
@@ -46,10 +48,12 @@ export async function callAgent(path: string, o: Opts & { method?: string; body?
 export async function proxy(req: Request, path: string, o: Opts = {}): Promise<Response> {
   let body: string | undefined;
   if (req.method !== "GET" && req.method !== "HEAD") {
+    // A declared length over the cap is refused before anything is read. The size check below catches a missing or false one.
+    if (Number(req.headers.get("content-length")) > MAX_BODY) return err(413, "body_too_large", "The body is over 16 KiB.");
     body = await req.text();
     if (new TextEncoder().encode(body).length > MAX_BODY) return err(413, "body_too_large", "The body is over 16 KiB.");
   }
-  return callAgent(path, { ...o, method: req.method, body, ip: clientIp(req.headers) });
+  return callAgent(path, { ...o, method: req.method, body, ip: clientIp(req.headers, o.env ?? process.env) });
 }
 
 // ---- MOCK_AGENT=1 ----------------------------------------------------------------------------------------------------------

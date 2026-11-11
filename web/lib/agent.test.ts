@@ -19,7 +19,7 @@ describe("proxy", () => {
   test("adds the proxy secret and the client IP on the server side", async () => {
     const a = fakeAgent();
     const req = new Request("http://site/api/attempt", { method: "POST", body: '{"tier":1}', headers: { "x-real-ip": "203.0.113.7" } });
-    await proxy(req, "/attempt", { env, fetch: a.f });
+    await proxy(req, "/attempt", { env: { ...env, VERCEL: "1" }, fetch: a.f });
     expect(a.calls[0]!.url).toBe("http://agent.internal:8080/attempt");
     expect(sent(a.calls[0]!).get("x-bulkhead-proxy-secret")).toBe(SECRET);
     expect(sent(a.calls[0]!).get("x-real-ip")).toBe("203.0.113.7");
@@ -85,10 +85,45 @@ describe("proxy", () => {
 });
 
 describe("clientIp", () => {
-  test("x-real-ip first, then the first x-forwarded-for entry, else nothing", () => {
-    expect(clientIp(new Headers({ "x-real-ip": "203.0.113.7", "x-forwarded-for": "1.1.1.1" }))).toBe("203.0.113.7");
-    expect(clientIp(new Headers({ "x-forwarded-for": "198.51.100.2, 10.0.0.1" }))).toBe("198.51.100.2");
-    expect(clientIp(new Headers())).toBeNull();
+  const h = new Headers({ "x-real-ip": "203.0.113.7", "x-forwarded-for": "198.51.100.2", "cf-connecting-ip": "192.0.2.9" });
+  test("off Vercel and with no trusted header named, no IP is sent, so the agent refuses (fail closed)", () => {
+    expect(clientIp(h, {})).toBeNull();
+  });
+  test("on Vercel, x-real-ip (Vercel overwrites it)", () => {
+    expect(clientIp(h, { VERCEL: "1" })).toBe("203.0.113.7");
+  });
+  test("TRUSTED_IP_HEADER names the one header to believe", () => {
+    expect(clientIp(h, { TRUSTED_IP_HEADER: "cf-connecting-ip" })).toBe("192.0.2.9");
+    expect(clientIp(h, { TRUSTED_IP_HEADER: "x-real-ip", VERCEL: "1" })).toBe("203.0.113.7");
+  });
+  test("x-forwarded-for is never used, even when it is the only header", () => {
+    const xff = new Headers({ "x-forwarded-for": "198.51.100.2" });
+    expect(clientIp(xff, { VERCEL: "1" })).toBeNull();
+    expect(clientIp(xff, {})).toBeNull();
+  });
+  test("the proxy sends no x-real-ip when it cannot trust one", async () => {
+    const a = fakeAgent();
+    await proxy(new Request("http://site/api/attempt", { method: "POST", body: "{}", headers: { "x-real-ip": "203.0.113.7" } }), "/attempt", { env, fetch: a.f });
+    expect(sent(a.calls[0]!).get("x-real-ip")).toBeNull();
+  });
+});
+
+describe("body cap", () => {
+  test("a declared content-length over 16 KiB is refused before the body is read", async () => {
+    const a = fakeAgent();
+    let read = false;
+    const body = new ReadableStream({
+      pull(c) {
+        read = true;
+        c.enqueue(new TextEncoder().encode("{}"));
+        c.close();
+      },
+    }, { highWaterMark: 0 }); // nothing is pulled until someone reads
+    const req = new Request("http://site/api/attempt", { method: "POST", body, headers: { "content-length": String(16 * 1024 + 1) }, duplex: "half" } as RequestInit);
+    const res = await proxy(req, "/attempt", { env, fetch: a.f });
+    expect(res.status).toBe(413);
+    expect(read).toBe(false);
+    expect(a.calls.length).toBe(0);
   });
 });
 
