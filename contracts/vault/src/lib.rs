@@ -1,6 +1,12 @@
-use near_sdk::json_types::U128;
+use near_sdk::json_types::{U128, U64};
 use near_sdk::store::{IterableMap, IterableSet};
 use near_sdk::{env, ext_contract, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise, PromiseError};
+use shade_attestation::attestation::DstackAttestation;
+use shade_attestation::measurements::{FullMeasurements, FullMeasurementsHex};
+use shade_attestation::report_data::ReportData;
+use shade_attestation::tcb_info::HexBytes;
+#[cfg(any(feature = "stub-attestation", test))]
+use shade_attestation::measurements::create_mock_full_measurements_hex;
 
 pub mod address;
 pub mod btc;
@@ -10,6 +16,29 @@ pub mod evm;
 const TIMELOCK_NS: u64 = 60_000_000_000;
 #[cfg(not(feature = "testnet-short-timelock"))]
 const TIMELOCK_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
+
+/// How long one TEE attestation lets an agent act; it renews before this runs out.
+pub const ATTESTATION_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Platform ID of the TDX machine the agent runs on.
+pub type Ppid = HexBytes<16>;
+
+/// What a registered agent proved: its TEE measurements, its machine, and until when.
+#[near(serializers = [borsh])]
+#[derive(Clone, Debug)]
+pub struct Agent {
+    pub measurements: FullMeasurementsHex,
+    pub ppid: Ppid,
+    pub valid_until_ms: u64,
+}
+
+#[near(serializers = [json])]
+#[derive(Clone, Debug)]
+pub struct AgentView {
+    pub measurements: FullMeasurementsHex,
+    pub ppid: Ppid,
+    pub valid_until_ms: U64,
+}
 
 #[near(serializers = [json, borsh])]
 #[derive(Clone, Debug, PartialEq)]
@@ -53,7 +82,8 @@ pub struct EvmTier {
 #[near(serializers = [json, borsh])]
 #[derive(Clone, Debug)]
 pub enum PendingAction {
-    Codehash { codehash: String, ready_at_ns: u64 },
+    Measurements { measurements: FullMeasurementsHex, ready_at_ns: u64 },
+    Ppid { ppid: Ppid, ready_at_ns: u64 },
     EmergencyWithdraw { tier_id: u8, to: String, ready_at_ns: u64 },
 }
 
@@ -146,10 +176,12 @@ pub struct Contract {
     mpc_contract: AccountId,
     mainnet: bool,
     tiers: IterableMap<u8, Tier>,
-    approved_codehashes: IterableSet<String>,
-    pending_codehashes: IterableMap<String, u64>,
+    approved_measurements: IterableSet<FullMeasurementsHex>,
+    pending_measurements: IterableMap<FullMeasurementsHex, u64>,
+    approved_ppids: IterableSet<Ppid>,
+    pending_ppids: IterableMap<Ppid, u64>,
     pending_withdraws: IterableMap<u8, (String, u64)>,
-    agents: IterableMap<AccountId, String>,
+    agents: IterableMap<AccountId, Agent>,
     roots: IterableMap<u32, Vec<(u8, String)>>,
     /// attempt or withdraw id -> unsigned tx hex, kept after signing so a payout
     /// can be rebuilt and rebroadcast from contract state alone (E6).
@@ -167,8 +199,10 @@ impl Contract {
             mpc_contract,
             mainnet,
             tiers: IterableMap::new(b"t"),
-            approved_codehashes: IterableSet::new(b"a"),
-            pending_codehashes: IterableMap::new(b"p"),
+            approved_measurements: IterableSet::new(b"a"),
+            pending_measurements: IterableMap::new(b"p"),
+            approved_ppids: IterableSet::new(b"d"),
+            pending_ppids: IterableMap::new(b"e"),
             pending_withdraws: IterableMap::new(b"w"),
             agents: IterableMap::new(b"g"),
             roots: IterableMap::new(b"r"),
@@ -190,11 +224,17 @@ impl Contract {
         .unwrap_or_else(|e| env::panic_str(e));
     }
 
-    /// Any registered agent whose codehash is approved may act (E1), so a TEE
-    /// reboot or new codehash needs no change to the frozen tiers.
+    /// Any registered agent may act while its attestation is fresh and its
+    /// measurements and machine are still approved (E1), so a TEE reboot or a
+    /// new image needs no change to the frozen tiers. Removing either approval
+    /// stops the agent at once.
     fn assert_approved_agent(&self) {
         let caller = env::predecessor_account_id();
-        let approved = self.agents.get(&caller).is_some_and(|c| self.approved_codehashes.contains(c));
+        let approved = self.agents.get(&caller).is_some_and(|a| {
+            env::block_timestamp_ms() <= a.valid_until_ms
+                && self.approved_measurements.contains(&a.measurements)
+                && self.approved_ppids.contains(&a.ppid)
+        });
         require!(approved, "ERR_NOT_TIER_AGENT");
     }
 
@@ -229,13 +269,64 @@ impl Contract {
             .sign(SignRequest::ecdsa(sighash, path))
     }
 
-    /// Dev stand-in for the Shade `register_agent` merged in Task 10. Mainnet
-    /// builds omit this feature; `check-mainnet-wasm` verifies that.
+    /// Dev stand-in for `register_agent` when there is no TEE: approves the
+    /// all-zero mock measurements and PPID without the timelock. Mainnet builds
+    /// omit this feature; `check-mainnet-wasm` verifies that.
     #[cfg(feature = "stub-attestation")]
-    pub fn register_agent_stub(&mut self, account: AccountId, codehash: String) {
+    pub fn register_agent_stub(&mut self, account: AccountId) {
         self.assert_owner();
-        self.approved_codehashes.insert(codehash.clone());
-        self.agents.insert(account, codehash);
+        let measurements = create_mock_full_measurements_hex();
+        self.approved_measurements.insert(measurements.clone());
+        self.approved_ppids.insert(Ppid::default());
+        let valid_until_ms = env::block_timestamp_ms() + ATTESTATION_TTL_MS;
+        self.agents.insert(account, Agent { measurements, ppid: Ppid::default(), valid_until_ms });
+    }
+
+    /// Called by the agent from inside its TEE. The quote must bind the
+    /// caller's implicit account, pass Intel's checks, and match approved
+    /// measurements and an approved PPID. A first registration pays for its
+    /// storage; a renewal pays nothing, because the agent renews with its
+    /// function-call key, which cannot attach a deposit.
+    #[payable]
+    pub fn register_agent(&mut self, attestation: DstackAttestation) {
+        let caller = env::predecessor_account_id();
+        let id = caller.as_str();
+        require!(id.len() == 64 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "ERR_NOT_IMPLICIT_ACCOUNT");
+        let mut report_data = [0u8; 64];
+        report_data[..32].copy_from_slice(&hex::decode(id).unwrap_or_else(|_| env::panic_str("ERR_NOT_IMPLICIT_ACCOUNT")));
+
+        let accepted_measurements: Vec<FullMeasurements> = self.approved_measurements.iter().cloned().map(Into::into).collect();
+        let accepted_ppids: Vec<Ppid> = self.approved_ppids.iter().cloned().collect();
+        let accepted = attestation
+            .verify(ReportData::from(report_data), env::block_timestamp_ms() / 1000, &accepted_measurements, &accepted_ppids)
+            .unwrap_or_else(|e| env::panic_str(&format!("ERR_ATTESTATION: {e}")));
+
+        let renewal = self.agents.contains_key(&caller);
+        let storage_before = env::storage_usage();
+        let agent = Agent {
+            measurements: accepted.measurements.into(),
+            ppid: accepted.ppid,
+            valid_until_ms: env::block_timestamp_ms() + ATTESTATION_TTL_MS,
+        };
+        emit(
+            "agent_registered",
+            near_sdk::serde_json::json!({"account_id": id, "ppid": agent.ppid, "valid_until_ms": U64(agent.valid_until_ms), "renewal": renewal}),
+        );
+        self.agents.insert(caller, agent);
+        self.agents.flush();
+        if !renewal {
+            let added = env::storage_usage().saturating_sub(storage_before);
+            let cost = env::storage_byte_cost().saturating_mul(added.into());
+            require!(env::attached_deposit() >= cost, "ERR_STORAGE_DEPOSIT");
+        }
+    }
+
+    pub fn get_agent(&self, account_id: AccountId) -> Option<AgentView> {
+        self.agents.get(&account_id).map(|a| AgentView {
+            measurements: a.measurements.clone(),
+            ppid: a.ppid.clone(),
+            valid_until_ms: U64(a.valid_until_ms),
+        })
     }
 
     /// Spending cap, cooldown and status are enforced here, whatever the LLM
@@ -362,26 +453,70 @@ impl Contract {
         self.roots.get(&day).cloned().unwrap_or_default()
     }
 
-    pub fn propose_codehash(&mut self, codehash: String) {
+    // Approving is timelocked because it lets new code or new machines act;
+    // removing takes effect at once because it can only stop agents.
+
+    pub fn propose_measurements(&mut self, measurements: FullMeasurementsHex) {
         self.assert_owner();
-        self.pending_codehashes.insert(codehash, env::block_timestamp() + TIMELOCK_NS);
+        self.pending_measurements.insert(measurements, env::block_timestamp() + TIMELOCK_NS);
     }
 
-    pub fn cancel_codehash_proposal(&mut self, codehash: String) {
+    pub fn cancel_measurements_proposal(&mut self, measurements: FullMeasurementsHex) {
         self.assert_owner();
-        self.pending_codehashes.remove(&codehash);
+        self.pending_measurements.remove(&measurements);
     }
 
-    pub fn approve_codehash(&mut self, codehash: String) {
+    pub fn approve_measurements(&mut self, measurements: FullMeasurementsHex) {
         self.assert_owner();
-        let ready = *self.pending_codehashes.get(&codehash).unwrap_or_else(|| env::panic_str("ERR_NO_PROPOSAL"));
+        let ready = *self.pending_measurements.get(&measurements).unwrap_or_else(|| env::panic_str("ERR_NO_PROPOSAL"));
         require!(env::block_timestamp() >= ready, "ERR_TIMELOCK");
-        self.pending_codehashes.remove(&codehash);
-        self.approved_codehashes.insert(codehash);
+        self.pending_measurements.remove(&measurements);
+        self.approved_measurements.insert(measurements);
     }
 
-    pub fn is_codehash_approved(&self, codehash: String) -> bool {
-        self.approved_codehashes.contains(&codehash)
+    pub fn remove_measurements(&mut self, measurements: FullMeasurementsHex) {
+        self.assert_owner();
+        self.approved_measurements.remove(&measurements);
+    }
+
+    pub fn get_approved_measurements(&self) -> Vec<FullMeasurementsHex> {
+        self.approved_measurements.iter().cloned().collect()
+    }
+
+    pub fn propose_ppids(&mut self, ppids: Vec<Ppid>) {
+        self.assert_owner();
+        let ready = env::block_timestamp() + TIMELOCK_NS;
+        for p in ppids {
+            self.pending_ppids.insert(p, ready);
+        }
+    }
+
+    pub fn cancel_ppids_proposal(&mut self, ppids: Vec<Ppid>) {
+        self.assert_owner();
+        for p in ppids {
+            self.pending_ppids.remove(&p);
+        }
+    }
+
+    pub fn approve_ppids(&mut self, ppids: Vec<Ppid>) {
+        self.assert_owner();
+        for p in ppids {
+            let ready = *self.pending_ppids.get(&p).unwrap_or_else(|| env::panic_str("ERR_NO_PROPOSAL"));
+            require!(env::block_timestamp() >= ready, "ERR_TIMELOCK");
+            self.pending_ppids.remove(&p);
+            self.approved_ppids.insert(p);
+        }
+    }
+
+    pub fn remove_ppids(&mut self, ppids: Vec<Ppid>) {
+        self.assert_owner();
+        for p in ppids {
+            self.approved_ppids.remove(&p);
+        }
+    }
+
+    pub fn get_approved_ppids(&self) -> Vec<Ppid> {
+        self.approved_ppids.iter().cloned().collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -496,10 +631,11 @@ impl Contract {
 
     pub fn pending_owner_actions(&self) -> Vec<PendingAction> {
         let mut v: Vec<PendingAction> = self
-            .pending_codehashes
+            .pending_measurements
             .iter()
-            .map(|(c, t)| PendingAction::Codehash { codehash: c.clone(), ready_at_ns: *t })
+            .map(|(m, t)| PendingAction::Measurements { measurements: m.clone(), ready_at_ns: *t })
             .collect();
+        v.extend(self.pending_ppids.iter().map(|(p, t)| PendingAction::Ppid { ppid: p.clone(), ready_at_ns: *t }));
         v.extend(self.pending_withdraws.iter().map(|(id, (to, t))| PendingAction::EmergencyWithdraw {
             tier_id: *id,
             to: to.clone(),
@@ -521,8 +657,12 @@ impl Contract {
 
 #[cfg(test)]
 impl Contract {
-    fn register_agent_unapproved_for_test(&mut self, account: AccountId, codehash: String) {
-        self.agents.insert(account, codehash);
+    /// An agent whose all-ones measurements were never approved.
+    fn register_agent_unapproved_for_test(&mut self, account: AccountId) {
+        let mut measurements = create_mock_full_measurements_hex();
+        measurements.app_compose_hash_payload = [1u8; 32].into();
+        let valid_until_ms = env::block_timestamp_ms() + ATTESTATION_TTL_MS;
+        self.agents.insert(account, Agent { measurements, ppid: Ppid::default(), valid_until_ms });
     }
 }
 
@@ -561,32 +701,57 @@ mod tests {
         c.configure_tier(id, Chain::Base, "bulkhead-tier-2".into(), EVM_TO.into(), U128(50_000_000), 3600, 4, Some(evm));
     }
 
-    #[test]
-    #[should_panic(expected = "ERR_TIMELOCK")]
-    fn approve_codehash_before_24h_panics() {
-        let mut c = setup();
-        c.propose_codehash("abc".into());
-        ctx("owner.testnet", DAY_NS - 1);
-        c.approve_codehash("abc".into());
+    // ---- agent approval: measurements and PPIDs behind the timelock (Task 10, E1) ----
+
+    fn mock() -> FullMeasurementsHex {
+        create_mock_full_measurements_hex()
     }
 
     #[test]
-    fn approve_codehash_after_24h_works() {
+    #[should_panic(expected = "ERR_TIMELOCK")]
+    fn approve_measurements_before_24h_panics() {
         let mut c = setup();
-        c.propose_codehash("abc".into());
+        c.propose_measurements(mock());
+        ctx("owner.testnet", DAY_NS - 1);
+        c.approve_measurements(mock());
+    }
+
+    #[test]
+    fn approve_measurements_after_24h_works() {
+        let mut c = setup();
+        c.propose_measurements(mock());
         ctx("owner.testnet", DAY_NS);
-        c.approve_codehash("abc".into());
-        assert!(c.is_codehash_approved("abc".into()));
+        c.approve_measurements(mock());
+        assert_eq!(c.get_approved_measurements(), vec![mock()]);
+        assert!(c.pending_owner_actions().is_empty());
     }
 
     #[test]
     #[should_panic(expected = "ERR_NO_PROPOSAL")]
-    fn cancelled_codehash_cannot_be_approved() {
+    fn cancelled_measurements_cannot_be_approved() {
         let mut c = setup();
-        c.propose_codehash("abc".into());
-        c.cancel_codehash_proposal("abc".into());
+        c.propose_measurements(mock());
+        c.cancel_measurements_proposal(mock());
         ctx("owner.testnet", DAY_NS);
-        c.approve_codehash("abc".into());
+        c.approve_measurements(mock());
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_TIMELOCK")]
+    fn approve_ppids_before_24h_panics() {
+        let mut c = setup();
+        c.propose_ppids(vec![Ppid::default()]);
+        ctx("owner.testnet", DAY_NS - 1);
+        c.approve_ppids(vec![Ppid::default()]);
+    }
+
+    #[test]
+    fn approve_ppids_after_24h_works() {
+        let mut c = setup();
+        c.propose_ppids(vec![Ppid::default()]);
+        ctx("owner.testnet", DAY_NS);
+        c.approve_ppids(vec![Ppid::default()]);
+        assert_eq!(c.get_approved_ppids(), vec![Ppid::default()]);
     }
 
     #[test]
@@ -594,7 +759,179 @@ mod tests {
     fn non_owner_cannot_propose() {
         let mut c = setup();
         ctx("mallory.testnet", 0);
-        c.propose_codehash("abc".into());
+        c.propose_measurements(mock());
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_NOT_OWNER")]
+    fn non_owner_cannot_propose_ppids() {
+        let mut c = setup();
+        ctx("mallory.testnet", 0);
+        c.propose_ppids(vec![Ppid::default()]);
+    }
+
+    // ---- register_agent with a real Phala TDX attestation (Task 10 step 3) ----
+
+    /// The attestation the S3 agent sent from a Phala CVM (dstack 0.5.12),
+    /// read from its register_agent call on testnet.
+    const S3_ATTESTATION: &str = include_str!("../tests/fixtures/s3-attestation.json");
+    const S3_AGENT: &str = "29dfb11751d74844bcd05306e6387ef264541f8be6d938925207a1f0af9749a1";
+    /// Block time of that call; the quote's collateral is valid then.
+    const S3_TS_NS: u64 = 1_794_386_972_287_526_154;
+    const DEPOSIT: NearToken = NearToken::from_millinear(10);
+
+    fn s3_measurements() -> FullMeasurementsHex {
+        near_sdk::serde_json::from_value(near_sdk::serde_json::json!({
+            "rtmrs": {
+                "mrtd": "7fe60787222bd394cb516abca2435f22f035ab2cc9c0a4b4b3b148e46297f3d931a237b72f359052c6e657d8c1409173",
+                "rtmr0": "68102e7b524af310f7b7d426ce75481e36c40f5d513a9009c046e9d37e31551f0134d954b496a3357fd61d03f07ffe96",
+                "rtmr1": "4ae609807c765916a31d724786ed74bcb97e168a9d937b04936aeef2015c907eba5ac352c6bcd749c246fd62ffb659ec",
+                "rtmr2": "764489f277a8540189761e72b4238ba36d4d647e11bd958d8ab5522af2a4867b0ff63e06b0c4967f1857236244040a5d"
+            },
+            "key_provider_event_digest": "1de9cfa982eab350c1c6719fed6f35f9be554d202c26d354e498b0b9e6ad2e6e1e02df3abfa85bd8113c9ea219c16deb",
+            "app_compose_hash_payload": "b4e628a4eb5c3fb110c32b15efa4769e7fd58e74665ad2120841233b02a0620f"
+        }))
+        .unwrap()
+    }
+
+    fn s3_ppid() -> Ppid {
+        near_sdk::serde_json::from_value(near_sdk::serde_json::json!("62d54040cb9dfc08bb13006fa75ece56")).unwrap()
+    }
+
+    fn s3_attestation() -> DstackAttestation {
+        near_sdk::serde_json::from_str(S3_ATTESTATION).unwrap()
+    }
+
+    fn call(pred: &str, ts: u64, deposit: NearToken) {
+        testing_env!(VMContextBuilder::new()
+            .predecessor_account_id(pred.parse().unwrap())
+            .block_timestamp(ts)
+            .attached_deposit(deposit)
+            .build());
+    }
+
+    /// Owner proposes a day before the S3 call and approves just before it.
+    fn approve_s3(c: &mut Contract, measurements: bool, ppid: bool) {
+        let proposed = S3_TS_NS - DAY_NS - 60_000_000_000;
+        ctx("owner.testnet", proposed);
+        if measurements {
+            c.propose_measurements(s3_measurements());
+        }
+        if ppid {
+            c.propose_ppids(vec![s3_ppid()]);
+        }
+        ctx("owner.testnet", proposed + DAY_NS);
+        if measurements {
+            c.approve_measurements(s3_measurements());
+        }
+        if ppid {
+            c.approve_ppids(vec![s3_ppid()]);
+        }
+    }
+
+    fn registered_s3() -> Contract {
+        let mut c = setup();
+        approve_s3(&mut c, true, true);
+        call(S3_AGENT, S3_TS_NS, DEPOSIT);
+        c.register_agent(s3_attestation());
+        c
+    }
+
+    #[test]
+    fn real_tee_agent_registers_and_can_act() {
+        let mut c = registered_s3();
+        let a = c.get_agent(S3_AGENT.parse().unwrap()).expect("registered");
+        assert_eq!(a.measurements, s3_measurements());
+        assert_eq!(a.ppid, s3_ppid());
+        assert_eq!(a.valid_until_ms.0, S3_TS_NS / 1_000_000 + ATTESTATION_TTL_MS);
+        event("agent_registered");
+        call(S3_AGENT, S3_TS_NS + 1_000, NearToken::from_yoctonear(0));
+        c.log_attempt_roots(1, vec![(0, "root".into())]);
+        assert_eq!(c.get_roots(1).len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_ATTESTATION")]
+    fn register_rejects_unapproved_measurements() {
+        let mut c = setup();
+        approve_s3(&mut c, false, true);
+        call(S3_AGENT, S3_TS_NS, DEPOSIT);
+        c.register_agent(s3_attestation());
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_ATTESTATION")]
+    fn register_rejects_unapproved_ppid() {
+        let mut c = setup();
+        approve_s3(&mut c, true, false);
+        call(S3_AGENT, S3_TS_NS, DEPOSIT);
+        c.register_agent(s3_attestation());
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_ATTESTATION")]
+    fn attestation_cannot_be_reused_by_another_account() {
+        let mut c = setup();
+        approve_s3(&mut c, true, true);
+        // The quote binds the S3 agent's account in its report data.
+        call(&"ab".repeat(32), S3_TS_NS, DEPOSIT);
+        c.register_agent(s3_attestation());
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_NOT_IMPLICIT_ACCOUNT")]
+    fn named_account_cannot_register() {
+        let mut c = setup();
+        approve_s3(&mut c, true, true);
+        call("agent.testnet", S3_TS_NS, DEPOSIT);
+        c.register_agent(s3_attestation());
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_STORAGE_DEPOSIT")]
+    fn first_registration_needs_storage_deposit() {
+        let mut c = setup();
+        approve_s3(&mut c, true, true);
+        call(S3_AGENT, S3_TS_NS, NearToken::from_yoctonear(0));
+        c.register_agent(s3_attestation());
+    }
+
+    #[test]
+    fn renewal_needs_no_deposit() {
+        // A function-call key cannot attach a deposit, and the agent renews with one.
+        let mut c = registered_s3();
+        call(S3_AGENT, S3_TS_NS + 1_000_000_000, NearToken::from_yoctonear(0));
+        c.register_agent(s3_attestation());
+        let a = c.get_agent(S3_AGENT.parse().unwrap()).unwrap();
+        assert_eq!(a.valid_until_ms.0, (S3_TS_NS + 1_000_000_000) / 1_000_000 + ATTESTATION_TTL_MS);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_NOT_TIER_AGENT")]
+    fn expired_registration_cannot_act() {
+        let mut c = registered_s3();
+        call(S3_AGENT, S3_TS_NS + (ATTESTATION_TTL_MS + 1) * 1_000_000, NearToken::from_yoctonear(0));
+        c.log_attempt_roots(1, vec![]);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_NOT_TIER_AGENT")]
+    fn removing_measurements_revokes_agent_at_once() {
+        let mut c = registered_s3();
+        ctx("owner.testnet", S3_TS_NS + 1_000);
+        c.remove_measurements(s3_measurements());
+        call(S3_AGENT, S3_TS_NS + 2_000, NearToken::from_yoctonear(0));
+        c.log_attempt_roots(1, vec![]);
+    }
+
+    #[test]
+    #[should_panic(expected = "ERR_NOT_TIER_AGENT")]
+    fn removing_ppid_revokes_agent_at_once() {
+        let mut c = registered_s3();
+        ctx("owner.testnet", S3_TS_NS + 1_000);
+        c.remove_ppids(vec![s3_ppid()]);
+        call(S3_AGENT, S3_TS_NS + 2_000, NearToken::from_yoctonear(0));
+        c.log_attempt_roots(1, vec![]);
     }
 
     #[test]
@@ -627,7 +964,7 @@ mod tests {
     fn pending_actions_listed_then_cancelled() {
         let mut c = setup();
         tier(&mut c, 1);
-        c.propose_codehash("abc".into());
+        c.propose_measurements(mock());
         c.propose_emergency_withdraw(1, "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".into());
         assert_eq!(c.pending_owner_actions().len(), 2);
         c.cancel_emergency_withdraw(1);
@@ -669,7 +1006,7 @@ mod tests {
     fn ready() -> Contract {
         let mut c = setup();
         tier(&mut c, 1);
-        c.register_agent_stub(AGENT.parse().unwrap(), "abc".into());
+        c.register_agent_stub(AGENT.parse().unwrap());
         ctx(AGENT, 1_000);
         c
     }
@@ -733,10 +1070,10 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "ERR_NOT_TIER_AGENT")]
-    fn registered_agent_with_unapproved_codehash_rejected() {
+    fn registered_agent_with_unapproved_measurements_rejected() {
         let mut c = ready();
         ctx("owner.testnet", 1_000);
-        c.register_agent_unapproved_for_test("other.testnet".parse().unwrap(), "nope".into());
+        c.register_agent_unapproved_for_test("other.testnet".parse().unwrap());
         ctx("other.testnet", 1_000);
         let _ = c.release_funds(1, "a1".into(), BTC_TO.into(), btc(50_000));
     }
@@ -745,7 +1082,7 @@ mod tests {
     fn second_approved_agent_can_release() {
         let mut c = ready();
         ctx("owner.testnet", 1_000);
-        c.register_agent_stub("agent2.testnet".parse().unwrap(), "abc".into());
+        c.register_agent_stub("agent2.testnet".parse().unwrap());
         ctx("agent2.testnet", 1_000);
         let _ = c.release_funds(1, "a1".into(), BTC_TO.into(), btc(50_000));
         assert!(matches!(c.get_tier(1).status, TierStatus::Releasing { .. }));
@@ -840,7 +1177,7 @@ mod tests {
     fn last_round_drains() {
         let mut c = setup();
         c.configure_tier(1, Chain::Bitcoin, "p".into(), TIER_ADDR.into(), U128(100_000), 3600, 1, None);
-        c.register_agent_stub(AGENT.parse().unwrap(), "abc".into());
+        c.register_agent_stub(AGENT.parse().unwrap());
         ctx(AGENT, 1_000);
         let _ = c.release_funds(1, "a1".into(), BTC_TO.into(), btc(50_000));
         signed(&mut c, 2_000, true);
@@ -1009,7 +1346,7 @@ mod tests {
     fn release_stores_the_real_base_usdc_transfer() {
         let mut c = setup();
         base_tier(&mut c, 2);
-        c.register_agent_stub(AGENT.parse().unwrap(), "abc".into());
+        c.register_agent_stub(AGENT.parse().unwrap());
         ctx(AGENT, 1_000);
         let _ = c.release_funds(2, "b1".into(), EVM_TO.into(), base(20_000_000));
         let (sighash, tx) =
@@ -1023,7 +1360,7 @@ mod tests {
     fn base_over_cap_rejected() {
         let mut c = setup();
         base_tier(&mut c, 2);
-        c.register_agent_stub(AGENT.parse().unwrap(), "abc".into());
+        c.register_agent_stub(AGENT.parse().unwrap());
         ctx(AGENT, 1_000);
         let _ = c.release_funds(2, "b1".into(), EVM_TO.into(), base(50_000_001));
     }
@@ -1134,7 +1471,7 @@ mod tests {
     #[should_panic(expected = "ERR_NOT_OWNER")]
     fn agent_cannot_execute_emergency_withdraw() {
         let mut c = withdraw_ready();
-        c.register_agent_stub(AGENT.parse().unwrap(), "abc".into());
+        c.register_agent_stub(AGENT.parse().unwrap());
         ctx(AGENT, DAY_NS);
         let _ = c.execute_emergency_withdraw(1, btc(5_000_000));
     }
