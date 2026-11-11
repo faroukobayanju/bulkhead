@@ -4,9 +4,8 @@
 # measurements the vault approves: change any line and the owner has to approve new measurements.
 # Only secrets come in as encrypted env (Phala's "allowed envs"); the dashboard cannot change anything else.
 #
-# Before deploying, replace the two REPLACE_ values:
+# Before deploying, replace the REPLACE_ values:
 #   - the image digest, from `docker buildx build --platform linux/amd64 --push` (see docs/deploy-tee-agent.md);
-#   - the vault account.
 # CODEHASH repeats the image digest so /attestation and every verdict name the image this CVM runs.
 services:
   bulkhead-agent:
@@ -22,7 +21,7 @@ services:
       TEE: "1"
       NEAR_NETWORK: testnet
       NEAR_RPC: https://rpc.testnet.fastnear.com
-      VAULT_ACCOUNT: REPLACE_VAULT.testnet
+      VAULT_ACCOUNT: vault5.bulkhead-haikeys.testnet
       MEMPOOL_BASE: https://mempool.space/testnet4/api
       TIER_ENABLED_1: "1"
       TIER_ENABLED_2: "0"

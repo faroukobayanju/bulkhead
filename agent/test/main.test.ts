@@ -107,7 +107,8 @@ describe("start()", () => {
   });
   test("outside mock mode: real wiring starts, the rebroadcast loop runs in-process and stops with the server", async () => {
     const net = fakeNet();
-    const { http, stop } = await start(live, () => {}, { ...NS, fetch: net.f, rebroadcastFirstMs: 5, rebroadcastMs: 15 });
+    // the roots poster reads the export on its startup catch-up; off here, so any export call is the rebroadcast loop's
+    const { http, stop } = await start(live, () => {}, { ...NS, fetch: net.f, rebroadcastFirstMs: 5, rebroadcastMs: 15, postRoots: false });
     let stopped = false;
     try {
       const base = `http://localhost:${http.port}`;
@@ -177,7 +178,7 @@ describe("start()", () => {
       expect(net.keys.length).toBe(1);
       expect(net.keys[0].access_key.permission).toEqual({ FunctionCall: { receiver_id: "v.testnet", method_names: AGENT_METHODS, allowance: (10n ** 24n).toString() } });
       expect(Buffer.from(utils.PublicKey.from(net.keys[0].public_key).data).toString("hex")).not.toBe(account);
-      expect(JSON.parse(lines[1]!)).toEqual({ event: "tee_fund_me", account });
+      expect(JSON.parse(lines[1]!)).toEqual({ event: "tee_fund_me", account, measurements: measurementsOf(fixture.tcb_info) });
       const a: any = await (await fetch(`http://localhost:${http.port}/attestation`, { headers: { "x-bulkhead-proxy-secret": S("d") } })).json();
       expect(a).toMatchObject({ agent_account: account, tee: true });
       expect(account).toMatch(/^[0-9a-f]{64}$/);

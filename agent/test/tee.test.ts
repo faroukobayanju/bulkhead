@@ -27,7 +27,7 @@ const S3 = {
 };
 // `approved` answers get_approved_measurements poll by poll (the last one repeats); "down" is an RPC outage.
 // Balance -1 is "no account yet", -2 an RPC outage. `lose` drops the answer to the first broadcast of that kind after applying it.
-function fakeNet(o: { approved?: (unknown[] | "down")[]; balances?: bigint[]; registerFails?: string; keyList?: (keys: any[]) => any[]; lose?: "register" | "scope"; collateral?: object } = {}) {
+function fakeNet(o: { approved?: (unknown[] | "down")[]; balances?: bigint[]; registerFails?: string; registerFailsTimes?: number; keyList?: (keys: any[]) => any[]; lose?: "register" | "scope"; collateral?: object } = {}) {
   const balances = [...(o.balances ?? [NEAR])];
   const approved = [...(o.approved ?? [[S3]])];
   const calls: string[] = [];
@@ -66,7 +66,7 @@ function fakeNet(o: { approved?: (unknown[] | "down")[]; balances?: bigint[]; re
       const t = transactions.SignedTransaction.decode(Buffer.from(params[0], "base64")).transaction;
       txs.push(t);
       const a = t.actions[0] as any;
-      if (a.functionCall?.methodName === "register_agent" && o.registerFails) failNext = { ActionError: { kind: { FunctionCallError: { ExecutionError: `Smart contract panicked: ${o.registerFails}` } } } };
+      if (a.functionCall?.methodName === "register_agent" && o.registerFails && (o.registerFailsTimes === undefined || o.registerFailsTimes-- > 0)) failNext = { ActionError: { kind: { FunctionCallError: { ExecutionError: `Smart contract panicked: ${o.registerFails}` } } } };
       if (a.addKey) {
         const fc = a.addKey.accessKey.permission.functionCall;
         keys = [{ public_key: hexOf(a.addKey.publicKey), access_key: { nonce: 0, permission: { FunctionCall: { receiver_id: fc.receiverId, method_names: fc.methodNames, allowance: fc.allowance.toString() } } } }];
@@ -166,7 +166,7 @@ describe("bootTee", () => {
     expect(r.account).toBe(Buffer.from(F!.getPublicKey().data).toString("hex"));
     expect(r.account).toMatch(/^[0-9a-f]{64}$/);
     expect(r.key.getPublicKey().toString()).toBe(S!.getPublicKey().toString());
-    expect(JSON.parse(b.lines[1]!)).toEqual({ event: "tee_fund_me", account: r.account });
+    expect(JSON.parse(b.lines[1]!)).toEqual({ event: "tee_fund_me", account: r.account, measurements: S3 }); // the owner approves from this line
     expect(b.slept.filter(ms => ms === 15_000).length).toBe(2);
 
     const [reg, rot] = net.txs;
@@ -187,15 +187,33 @@ describe("bootTee", () => {
     expect(add.accessKey.permission.functionCall).toMatchObject({ receiverId: VAULT, methodNames: AGENT_METHODS, allowance: NEAR });
     expect(hexOf(rot.actions[1].deleteKey.publicKey)).toBe(r.account); // F goes
   });
-  test("a contract refusal is terminal: no retry, a tee_stranded line names the account, and the ERR_ string is thrown", async () => {
-    const net = fakeNet({ registerFails: "ERR_ATTESTATION: measurements not approved" });
+  test("a contract refusal other than ERR_ATTESTATION is terminal: no retry, a tee_stranded line names the account, and the ERR_ string is thrown", async () => {
+    const net = fakeNet({ registerFails: "ERR_STORAGE_DEPOSIT" });
     const b = boot(net);
-    await expect(b.p).rejects.toThrow("ERR_ATTESTATION: measurements not approved");
+    await expect(b.p).rejects.toThrow("ERR_STORAGE_DEPOSIT");
     expect(net.txs.length).toBe(1); // one register, no key swap
     const account = Buffer.from(b.k.made[0]!.getPublicKey().data).toString("hex");
-    expect(JSON.parse(b.lines.at(-1)!)).toEqual({ event: "tee_stranded", account, step: "register", error: "ERR_ATTESTATION: measurements not approved" });
+    expect(JSON.parse(b.lines.at(-1)!)).toEqual({ event: "tee_stranded", account, step: "register", error: "ERR_STORAGE_DEPOSIT" });
     expect(b.slept).toEqual([]);
     noSecrets(b);
+  });
+  test("ERR_ATTESTATION (a PPID approval not landed yet) is retried every 5 min, six times, then tee_stranded", async () => {
+    const net = fakeNet({ registerFails: "ERR_ATTESTATION: ppid not approved" });
+    const b = boot(net);
+    await expect(b.p).rejects.toThrow("ERR_ATTESTATION: ppid not approved");
+    expect(net.txs.length).toBe(7);
+    expect(b.slept).toEqual(Array(6).fill(300_000));
+    const ev = b.lines.map(l => JSON.parse(l));
+    expect(ev.filter(e => e.event === "tee_retry").map(e => e.error)).toEqual(Array(6).fill("ERR_ATTESTATION: ppid not approved"));
+    expect(ev.at(-1)).toMatchObject({ event: "tee_stranded", step: "register", error: "ERR_ATTESTATION: ppid not approved" });
+    noSecrets(b);
+  });
+  test("ERR_ATTESTATION that clears after two tries registers and serves", async () => {
+    const net = fakeNet({ registerFails: "ERR_ATTESTATION: ppid not approved", registerFailsTimes: 2 });
+    const b = boot(net);
+    await b.p;
+    expect(b.slept).toEqual([300_000, 300_000]);
+    expect(net.txs.length).toBe(4); // three registers, one key swap
   });
   test("an RPC failure on register is retried after 15 s; a lost answer to the key swap is settled by the key list", async () => {
     const net = fakeNet({ lose: "register" });

@@ -2,7 +2,9 @@
 
 When your AI agent gets tricked, only one compartment floods. Bulkhead is a firewall and contract-enforced spending cap for agents that hold money, proven in **Drain Me**, its live arena. Built for NEAR HACKATHON (Nov 1–14, 2026).
 
-Three AI agents guard real BTC and USDC in a NEAR vault contract. Attackers try to talk them into paying out. Every attack feeds an open dataset and a firewall API with a measured block rate.
+AI guards hold Bitcoin testnet4 coins in a NEAR vault contract. Attackers try to talk them into paying out.
+
+**Testnet only.** Drain Me runs on NEAR testnet with Bitcoin testnet4 coins (tiers 1 and 3; the Base USDC tier is off). Nothing is on mainnet and no real money is at stake. Mainnet may come after judging, after an outside review of the contract. Every attack feeds an open dataset and a firewall API with a measured block rate.
 
 Builders can call the same API with their own tools and rules. See `docs/firewall-api.md`.
 

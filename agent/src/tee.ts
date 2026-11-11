@@ -16,6 +16,9 @@ const APPROVAL_POLL_MS = 5 * 60_000;
 const APPROVAL_LOG_EVERY = 12; // one tee_waiting_for_approval line an hour
 const TRIES = 5; // register and the key swap: 15 s, 30 s, 60 s, 120 s between tries
 const RETRY_MS = 15_000;
+// ERR_ATTESTATION after funding is most likely a PPID approval not landed yet (this boot does not check PPIDs): 6 more tries, 5 min apart.
+const ATTESTATION_RETRIES = 6;
+const ATTESTATION_RETRY_MS = 5 * 60_000;
 const LOW_ALLOWANCE = NEAR / 5n;
 const LOW_BALANCE = NEAR / 10n;
 
@@ -105,7 +108,7 @@ export async function bootTee(o: { fetch: typeof fetch; rpcUrl: string; vault: s
     await sleep(APPROVAL_POLL_MS);
   }
 
-  log("tee_fund_me");
+  log("tee_fund_me", { measurements });
   for (;;) {
     try {
       if ((await vault.balance()) >= MIN_BALANCE) break;
@@ -116,23 +119,28 @@ export async function bootTee(o: { fetch: typeof fetch; rpcUrl: string; vault: s
   }
 
   // Bounded retries. A failure left here strands the funded account: its keys die with this process.
-  const retry = async (step: string, fn: () => Promise<void>, terminal: (e: unknown) => boolean = () => false) => {
-    for (let i = 1, wait = RETRY_MS; ; i++, wait *= 2) {
+  // "fast": RPC trouble, doubling waits. "slow": ERR_ATTESTATION, fixed waits. Each kind keeps its own count.
+  type Kind = "terminal" | "fast" | "slow";
+  const retry = async (step: string, fn: () => Promise<void>, kind: (e: unknown) => Kind = () => "fast") => {
+    for (let fast = 0, slow = 0; ; ) {
       try {
         return await fn();
       } catch (e) {
-        if (terminal(e) || i >= TRIES) {
+        const k = kind(e);
+        const n = k === "slow" ? ++slow : ++fast;
+        if (k === "terminal" || n > (k === "slow" ? ATTESTATION_RETRIES : TRIES - 1)) {
           log("tee_stranded", { step, error: errOf(e) });
           throw e;
         }
-        log("tee_retry", { step, try: i, error: errOf(e) });
-        await sleep(wait);
+        log("tee_retry", { step, try: fast + slow, error: errOf(e) });
+        await sleep(k === "slow" ? ATTESTATION_RETRY_MS : RETRY_MS * 2 ** (n - 1));
       }
     }
   };
   const scopedNow = async () => keysAreScoped(await vault.accessKeys(), o.vault);
-  // A retry after a lost answer is a renewal on-chain, which is fine. An ERR_ from the contract will not change on retry.
-  await retry("register", async () => vault.registerAgent(await buildAttestation(o.fetch, account), STORAGE_DEPOSIT), e => e instanceof ContractRefusedError);
+  // A retry after a lost answer is a renewal on-chain, which is fine. Any ERR_ but ERR_ATTESTATION will not change on retry.
+  const registerKind = (e: unknown): Kind => (!(e instanceof ContractRefusedError) ? "fast" : /^ERR_ATTESTATION\b/.test(e.code) ? "slow" : "terminal");
+  await retry("register", async () => vault.registerAgent(await buildAttestation(o.fetch, account), STORAGE_DEPOSIT), registerKind);
   // The swap may have landed even when its answer was lost; then F is gone and only the key list can say so.
   let tries = 0;
   await retry("scope_keys", async () => {

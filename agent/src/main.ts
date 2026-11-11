@@ -23,8 +23,8 @@ import { buildDay } from "../../scripts/export-dataset";
 
 export type Started = { http: ReturnType<typeof Bun.serve>; stop: () => Promise<void>; locks: ReadonlySet<number>; lockedBy: ReadonlyMap<number, string> };
 
-// `o.fetch`, `o.port`, `o.rebroadcastMs` and `o.rebroadcastFirstMs` exist for tests; production passes neither.
-export async function start(env: Record<string, string | undefined> = process.env, out: (line: string) => void = console.error, o: { fetch?: typeof fetch; port?: number; rebroadcastMs?: number; rebroadcastFirstMs?: number } = {}): Promise<Started> {
+// `o.fetch`, `o.port`, `o.rebroadcastMs`, `o.rebroadcastFirstMs` and `o.postRoots` exist for tests; production passes none.
+export async function start(env: Record<string, string | undefined> = process.env, out: (line: string) => void = console.error, o: { fetch?: typeof fetch; port?: number; rebroadcastMs?: number; rebroadcastFirstMs?: number; postRoots?: boolean } = {}): Promise<Started> {
   const cfg = loadConfig(env);
   const f = o.fetch ?? fetch;
   const clock = Date.now;
@@ -137,7 +137,7 @@ export async function start(env: Record<string, string | undefined> = process.en
   const stopRenewal = tee && real ? startRenewal({ fetch: f, account: tee.account, register: real.registerAgent, funds: real.funds, log: out, alert }) : undefined;
   // The day's roots, with the agent's own key: in the TEE nothing else can post them. Live testnet too; the script's
   // --post-roots run and this one agree, since a day already holding the same roots counts as done.
-  const stopRoots = real && !cfg.mock ? startRootsPoster({ build: d => buildDay(db, d), vault: real, log, alert }) : undefined;
+  const stopRoots = real && !cfg.mock && o.postRoots !== false ? startRootsPoster({ build: d => buildDay(db, d), vault: real, log, alert }) : undefined;
   out(JSON.stringify({ event: "listening", port: http.port, mock: cfg.mock, network: cfg.network }));
   return {
     http,
