@@ -7,7 +7,7 @@
 ## What changes
 
 - **Network:** testnet only. Tiers hold Bitcoin testnet4 coins. No mainnet, no real money. Every page and post says "testnet".
-- **Tiers:** 1 and 3 on Bitcoin testnet4, following the go/no-go rule. Tier 2 (Base) is off (`TIER_2_ENABLED=0` or the config equivalent) unless a Base testnet run is green by the decision point.
+- **Tiers:** 1 and 3 on Bitcoin testnet4, following the go/no-go rule. Tier 2 (Base) is off (`TIER_ENABLED_2=0` on the agent and the web) unless a Base testnet run is green by the decision point.
 - **Agent registration:** the testnet vault is built with `stub-attestation`, and the owner calls `register_agent_stub(agent, "testnet-stub")`. `scripts/deploy-vault.ts` already does this.
 - **Agent host:** an ordinary server, not a TEE. The agent signs with a function-call key limited to `release_funds` and `log_attempt_roots` on the vault.
 - **Claims:** `/verify` and `docs/claims.md` say the agent is not in a TEE and its codehash is the stub. The NEAR AI model checks that `attest.ts` really verifies stay labeled verified. Nothing says "TEE verified".
