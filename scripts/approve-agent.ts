@@ -1,15 +1,18 @@
 // Approve a TEE agent on the vault from its own attestation.
 //
-//   bun scripts/approve-agent.ts --vault <vault> --owner <owner> --agent <implicit-account> \
-//     [--tx <register_agent tx hash>] [--network testnet|mainnet] [--approve] [--dry-run]
+//   bun scripts/approve-agent.ts --vault <vault> --owner <owner> \
+//     (--measurements '<json>' | --agent <implicit-account> [--tx <register_agent tx hash>]) \
+//     [--network testnet|mainnet] [--approve] [--dry-run]
 //
-// The agent's first register_agent call fails because nothing is approved yet,
-// but its arguments carry the attestation. This reads the measurements from that
-// call and proposes them, with the Phala PPIDs, as the owner. If the vault's
+// Preferred: --measurements with the JSON the agent prints in its tee_fund_me log,
+// so the owner approves before the agent is funded and it registers on its first
+// try. Otherwise --agent reads them from the agent's failed register_agent call,
+// whose arguments carry the attestation. Either way this proposes the
+// measurements, with the Phala PPIDs, as the owner. If the vault's
 // timelock is short (testnet, 60 s) it waits and approves in the same run;
 // otherwise run it again with --approve once the timelock has passed.
 // Signs with the owner's key from the near-cli legacy keychain.
-import { attestationFromTx, measurementsFromAttestation, PHALA_PPIDS, type Measurements } from "./lib/agent-approval";
+import { attestationFromTx, measurementsFromAttestation, parseMeasurements, PHALA_PPIDS, type Measurements } from "./lib/agent-approval";
 import { isExpiredTx } from "./lib/vault-deploy";
 
 const NET = {
@@ -69,17 +72,24 @@ async function main() {
   const vault = flag("--vault");
   const owner = flag("--owner");
   const agent = flag("--agent");
+  const given = flag("--measurements");
   const network = (flag("--network") ?? "testnet") as keyof typeof NET;
-  if (!vault || !owner || !agent || !NET[network]) {
-    console.error("usage: bun scripts/approve-agent.ts --vault <vault> --owner <owner> --agent <implicit-account> [--tx <hash>] [--network testnet|mainnet] [--approve] [--dry-run]");
+  if (!vault || !owner || (!agent && !given) || !NET[network]) {
+    console.error("usage: bun scripts/approve-agent.ts --vault <vault> --owner <owner> (--measurements '<json>' | --agent <implicit-account> [--tx <hash>]) [--network testnet|mainnet] [--approve] [--dry-run]");
     process.exit(2);
   }
   const { rpc: url, blocks } = NET[network];
 
-  const txHash = flag("--tx") ?? (await latestRegisterTx(blocks, vault, agent));
-  const tx = await rpc(url, "EXPERIMENTAL_tx_status", { tx_hash: txHash, sender_account_id: agent, wait_until: "NONE" });
-  const m = measurementsFromAttestation(attestationFromTx(tx));
-  console.log(`agent ${agent}, register_agent tx ${txHash}`);
+  let m: Measurements;
+  if (given) {
+    m = parseMeasurements(given);
+    console.log("measurements from the agent log");
+  } else {
+    const txHash = flag("--tx") ?? (await latestRegisterTx(blocks, vault, agent!));
+    const tx = await rpc(url, "EXPERIMENTAL_tx_status", { tx_hash: txHash, sender_account_id: agent, wait_until: "NONE" });
+    m = measurementsFromAttestation(attestationFromTx(tx));
+    console.log(`agent ${agent}, register_agent tx ${txHash}`);
+  }
   console.log(`measurements: ${JSON.stringify(m)}`);
   if (args.includes("--dry-run")) return;
 
@@ -119,7 +129,7 @@ async function main() {
     ownerCall(network, vault, owner, "approve_ppids", { ppids: toApproveP });
     console.log(`approved ${toApproveP.length} PPIDs`);
   }
-  console.log(`done. The agent registers on its next attempt; check with get_agent and scripts/check-agent-key.ts ${agent} --vault ${vault}`);
+  console.log(`done. ${given ? "Now fund the agent: it registers on its first try." : "The agent registers on its next attempt."} Check with get_agent and scripts/check-agent-key.ts <agent> --vault ${vault}`);
 }
 
 main().catch((e) => {

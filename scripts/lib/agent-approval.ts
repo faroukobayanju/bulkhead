@@ -43,6 +43,26 @@ export function measurementsFromAttestation(a: Attestation): Measurements {
   };
 }
 
+/** Measurements as a TEE agent prints them before it is funded, checked field by field:
+ * 48-byte registers and digest, 32-byte compose hash, lowercase hex as the contract stores them. */
+export function parseMeasurements(json: string): Measurements {
+  const m = JSON.parse(json);
+  const hex = (name: string, v: unknown, bytes: number) => {
+    if (typeof v !== "string" || !new RegExp(`^[0-9a-f]{${bytes * 2}}$`).test(v)) throw new Error(`${name} must be ${bytes} bytes of lowercase hex`);
+    return v;
+  };
+  return {
+    rtmrs: {
+      mrtd: hex("mrtd", m.rtmrs?.mrtd, 48),
+      rtmr0: hex("rtmr0", m.rtmrs?.rtmr0, 48),
+      rtmr1: hex("rtmr1", m.rtmrs?.rtmr1, 48),
+      rtmr2: hex("rtmr2", m.rtmrs?.rtmr2, 48),
+    },
+    key_provider_event_digest: hex("key_provider_event_digest", m.key_provider_event_digest, 48),
+    app_compose_hash_payload: hex("app_compose_hash_payload", m.app_compose_hash_payload, 32),
+  };
+}
+
 type TxResult = { transaction: { actions: ({ FunctionCall?: { method_name: string; args: string } } | string)[] } };
 
 /** The attestation argument of a register_agent transaction (EXPERIMENTAL_tx_status result). */
