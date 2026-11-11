@@ -274,7 +274,7 @@ export function AttemptPanel({ tier, network, mock, open, closedReason }: { tier
           </ol>
         )}
         {phase.kind === "sending" && <p className="muted">Sending…</p>}
-        {phase.kind === "done" && <Result screen={phase.screen} at={phase.at} />}
+        {phase.kind === "done" && <Result screen={phase.screen} at={phase.at} demo={mock} />}
       </div>
       {running && convexLive && !mock && <LiveStage id={running.id} onStage={onLiveStage} />}
     </div>
@@ -283,11 +283,16 @@ export function AttemptPanel({ tier, network, mock, open, closedReason }: { tier
 
 const later = (a: string, b: string) => (STAGES.indexOf(b as never) > STAGES.indexOf(a as never) ? b : a);
 
-function Result({ screen, at }: { screen: Screen; at: number }) {
+function Result({ screen, at, demo }: { screen: Screen; at: number; demo: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => ref.current?.focus(), []);
   return (
     <div ref={ref} tabIndex={-1} className={`result reveal ${screen.tone}`} data-testid="result">
+      {demo && (
+        <span className="tag" data-testid="demo-tag" title="MOCK_AGENT=1: this result is a fixture, not the arena">
+          Demo
+        </span>
+      )}
       <h3>{screen.title}</h3>
       {screen.lines.map(l => (
         <p key={l}>{l}</p>

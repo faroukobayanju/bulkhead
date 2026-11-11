@@ -175,3 +175,4 @@ pre.code { background: #0a141c; border: 1px solid var(--line); padding: 16px; ov
 .prose li + li { margin-top: 6px; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 input.mono { font-family: var(--font-mono), monospace; font-size: 15px; }
+.tag { justify-self: start; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; color: var(--ink); background: var(--bone); padding: 2px 8px; border-radius: var(--radius); }

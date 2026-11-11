@@ -2,6 +2,7 @@
 // RPC; balances from mempool.space (Bitcoin) and a Base RPC (USDC). Every read can fail on its own and comes back as null.
 import fixture from "../fixtures/arena.json";
 import { CHAIN_OF, mempoolApi, type Network, type TierId } from "./links";
+import { checkMode } from "./mode";
 import { formatNative, tierStatus, type ContractTier, type Pot, type TierState } from "./tiers";
 
 export type Pending = { kind: "codehash"; codehash: string; readyAt: number } | { kind: "withdraw"; tierId: number; to: string; readyAt: number };
@@ -19,7 +20,7 @@ export type ArenaTier = {
 export type Arena = { network: Network; at: string; config: Config | null; tiers: ArenaTier[]; pending: Pending[] | null; mock: boolean };
 
 export const network = (): Network => (process.env.NEXT_PUBLIC_NETWORK === "mainnet" ? "mainnet" : "testnet");
-export const isMock = () => process.env.MOCK_AGENT === "1";
+export const isMock = () => checkMode();
 const enabled = (t: TierId) => process.env[`TIER_ENABLED_${t}`] !== "0";
 const IDS: TierId[] = [1, 2, 3];
 const T = 8000;

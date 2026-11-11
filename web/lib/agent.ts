@@ -4,6 +4,7 @@ import { MAX_MESSAGE, STAGES } from "../../shared/attempt";
 import attempts from "../fixtures/attempts.json";
 import attestation from "../fixtures/attestation.json";
 import session from "../fixtures/session.json";
+import { checkMode } from "./mode";
 
 export type AgentEnv = { [k: string]: string | undefined; AGENT_URL?: string; PROXY_SECRET?: string; MOCK_AGENT?: string; VERCEL?: string; TRUSTED_IP_HEADER?: string };
 type Opts = { env?: AgentEnv; fetch?: typeof fetch; now?: () => number };
@@ -25,7 +26,7 @@ export function clientIp(h: Headers, env: AgentEnv = process.env): string | null
 
 export async function callAgent(path: string, o: Opts & { method?: string; body?: string; ip?: string | null } = {}): Promise<Response> {
   const env = o.env ?? process.env;
-  if (env.MOCK_AGENT === "1") return mock(path, o.method ?? "GET", o.body, (o.now ?? Date.now)());
+  if (checkMode(env)) return mock(path, o.method ?? "GET", o.body, (o.now ?? Date.now)());
   if (!env.AGENT_URL || !env.PROXY_SECRET) return err(503, "agent_not_configured", "The arena agent is not configured on this site.");
   const headers: Record<string, string> = { "x-bulkhead-proxy-secret": env.PROXY_SECRET };
   if (o.body !== undefined) headers["content-type"] = "application/json";

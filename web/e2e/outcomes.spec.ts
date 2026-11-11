@@ -27,6 +27,7 @@ for (const [name, copy, tier = 1] of CASES) {
     await signIn(page, tier);
     const r = await attempt(page, `mock:${name}`, tier);
     await expect(r).toContainText(copy);
+    await expect(r.getByTestId("demo-tag")).toHaveText("Demo");
   });
 }
 
