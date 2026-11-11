@@ -20,9 +20,17 @@ export type DeployOptions = {
   maxSats: bigint;
   cooldownS: number;
   rounds: number;
+  /** No stub: the agent registers itself from a TEE, approvals use the 60 s testnet timelock. */
+  tee: boolean;
 };
 
 const FLAGS = ["--owner", "--vault", "--agent", "--tier", "--max-sats", "--cooldown", "--rounds"] as const;
+const SWITCHES = ["--tee"] as const;
+
+/** Cargo features of the testnet build: the stub for a dev agent, or none of it for a TEE agent. */
+export function buildFeatures(o: DeployOptions): string {
+  return o.tee ? "testnet-short-timelock" : "stub-attestation";
+}
 
 function int(flag: string, v: string, min: number, max: number): number {
   if (!/^\d+$/.test(v) || Number(v) < min || Number(v) > max) {
@@ -40,12 +48,20 @@ function testnetAccount(flag: string, v: string): string {
 
 export function parseArgs(argv: string[]): DeployOptions {
   const raw = new Map<string, string>();
+  const switches = new Set<string>();
   for (let i = 0; i < argv.length; i += 2) {
     const flag = argv[i];
+    if ((SWITCHES as readonly string[]).includes(flag)) {
+      switches.add(flag);
+      i -= 1; // a switch takes no value
+      continue;
+    }
     if (!(FLAGS as readonly string[]).includes(flag)) throw new Error(`unknown flag ${flag}`);
     if (argv[i + 1] === undefined) throw new Error(`${flag} needs a value`);
     raw.set(flag, argv[i + 1]);
   }
+  const tee = switches.has("--tee");
+  if (tee && raw.has("--agent")) throw new Error("--agent does not apply with --tee: the TEE agent registers itself");
   const need = (flag: string) => {
     const v = raw.get(flag);
     if (v === undefined) throw new Error(`${flag} is required`);
@@ -67,6 +83,7 @@ export function parseArgs(argv: string[]): DeployOptions {
     maxSats: BigInt(maxRaw),
     cooldownS: int("--cooldown", need("--cooldown"), 0, MAX_COOLDOWN_S),
     rounds: int("--rounds", need("--rounds"), 1, MAX_ROUNDS),
+    tee,
   };
 }
 
