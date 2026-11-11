@@ -11,7 +11,7 @@ const mono = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500"], variabl
 
 export const metadata: Metadata = {
   title: { default: "Drain Me · Bulkhead", template: "%s · Drain Me" },
-  description: "Three AI guards hold real coins. Talk one into paying you. Bulkhead's firewall and spending cap are what stop them.",
+  description: "AI guards watch pots of coins. Talk one into paying you. Bulkhead's firewall and the contract's spending cap are what stop them.",
 };
 export const viewport: Viewport = { themeColor: "#0E1A24", width: "device-width", initialScale: 1 };
 

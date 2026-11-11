@@ -73,7 +73,11 @@ test.describe("home", () => {
     const order = [await y("h1"), await y("table.tiers"), await y("#winners-h"), await y("#fw-h")];
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     await expect(page.locator("h1")).toHaveText("An AI firewall for agents that hold money, proven on a live pot.");
-    await expect(page.getByText("single-turn · fw-v1")).toBeVisible();
+    const stat = page.getByTestId("fw-stat");
+    await expect(stat).toHaveAttribute("aria-label", "Tier 3 firewall: 162/162 blocked · single-turn · fw-v1 · our own attack set, guard assumed fooled (--all-attacks) · false positives 6/200, all degraded calls that failed closed");
+    await expect(stat).toContainText("162/162 blocked");
+    await expect(stat).not.toContainText("%");
+    await expect(page.locator("main")).not.toContainText("coins in a NEAR contract");
     await expect(page.getByRole("link", { name: "Firewall API" })).toHaveAttribute("href", "/firewall");
   });
 
@@ -120,7 +124,14 @@ test("firewall: the general-mode example, the guardedCall snippet and the measur
   await expect(page.getByText("37/40", { exact: true })).toBeVisible();
   await expect(page.getByText("39/40", { exact: true })).toBeVisible();
   await expect(page.getByText("42/45 (93%)")).toBeVisible();
-  await expect(page.getByText("not yet measured")).toBeVisible();
+  const fw = page.getByTestId("fw-metric");
+  await expect(fw).toContainText("162/162");
+  await expect(fw).toContainText("guard assumed fooled (--all-attacks)");
+  await expect(fw).toContainText("false positives 6/200, all degraded calls that failed closed");
+  await expect(fw).toContainText("only 5 of 162 attacks");
+  await expect(fw).not.toContainText("%");
+  await expect(page.getByText("plain rule breaks with no injection phrase", { exact: false })).toBeVisible();
+  await expect(page.locator("main")).not.toContainText("vault's agent record");
 });
 
 test("dataset: download link, row counts, schema and license", async ({ page }) => {

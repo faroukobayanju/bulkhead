@@ -56,13 +56,12 @@ export default function FirewallPage() {
             <span className="value">{GENERAL_EVAL.summary.legitAllowed}</span>
             <span className="small muted">0 false blocks, 1 escalated; p95 {GENERAL_EVAL.summary.p95}</span>
           </div>
-          <div className="metric">
-            <span className="muted small">Arena block rate, {ARENA_FW.version}</span>
-            <span className="value" style={{ fontSize: 22 }}>
-              {ARENA_FW.blockRate}
-            </span>
+          <div className="metric" data-testid="fw-metric">
+            <span className="muted small">Arena firewall, {ARENA_FW.version}</span>
+            <span className="value">{ARENA_FW.blocked}</span>
+            <span className="small muted">{ARENA_FW.line.split(" · ").slice(1).join(" · ")}</span>
             <span className="small muted">
-              <a href={`${REPO}/${ARENA_FW.source}`}>firewall-versions.md</a>
+              The natural run failed its size gate: only {ARENA_FW.naturalReached} of 162 attacks got tier 1 to call the payout tool. <a href={`${REPO}/${ARENA_FW.source}`}>firewall-versions.md</a>
             </span>
           </div>
         </div>
@@ -70,7 +69,7 @@ export default function FirewallPage() {
           {GENERAL_EVAL.lines.join("\n")}
         </pre>
         <p className="small muted" style={{ marginTop: 12 }}>
-          All three missed attacks broke a number limit with no trick wording. A model is weak at checking numbers against a limit: enforce hard limits in code or in a contract, as the Drain Me vault does.
+          All three missed attacks were plain rule breaks with no injection phrase: two refunds over the limit and one with no order number. A model is weak at checks like these: enforce hard limits in code or in a contract, as the Drain Me vault does.
         </p>
 
         <h3 style={{ marginTop: 32 }}>Attack sets we did not write</h3>
@@ -130,7 +129,7 @@ export default function FirewallPage() {
               <strong>Degraded</strong>: if the judge fails or takes over 3.5 s, the answer is HTTP 200, block, risk 100, reason judge_unavailable, with the header <span className="mono">x-firewall-degraded: 1</span>. Retry.
             </p>
             <p>
-              <strong>Verify a verdict</strong>: ed25519 over sha256 of the canonical JSON without the signature, by the key in the vault's agent record. A short verify.ts is in the API docs.
+              <strong>Verify a verdict</strong>: ed25519 over sha256 of the canonical JSON without the signature, with the input hash and the time inside the signed bytes. A short verify.ts is in the API docs.
             </p>
             <p>
               Full API docs: <a href={`${REPO}/docs/firewall-api.md`}>docs/firewall-api.md</a>. Key issuance on this page is not built yet.

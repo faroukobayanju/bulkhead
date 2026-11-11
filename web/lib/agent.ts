@@ -5,7 +5,7 @@ import attempts from "../fixtures/attempts.json";
 import attestation from "../fixtures/attestation.json";
 import session from "../fixtures/session.json";
 
-export type AgentEnv = { AGENT_URL?: string; PROXY_SECRET?: string; MOCK_AGENT?: string; VERCEL?: string; TRUSTED_IP_HEADER?: string };
+export type AgentEnv = { [k: string]: string | undefined; AGENT_URL?: string; PROXY_SECRET?: string; MOCK_AGENT?: string; VERCEL?: string; TRUSTED_IP_HEADER?: string };
 type Opts = { env?: AgentEnv; fetch?: typeof fetch; now?: () => number };
 
 const MAX_BODY = 16 * 1024; // the agent's own bodyLimit

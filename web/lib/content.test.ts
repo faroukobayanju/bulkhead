@@ -22,9 +22,20 @@ test("every public-baseline row is in docs/public-baselines.md", () => {
   for (const r of PUBLIC_BASELINES.rows) expect(doc).toContain(`| ${r.set} | ${r.mode} | ${r.blocked} | ${r.heuristics} | ${r.p95} |`);
 });
 
-test("the arena block rate says what docs/firewall-versions.md says", () => {
-  expect(read(ARENA_FW.source)).toContain(`| ${ARENA_FW.version} |`);
-  expect(read(ARENA_FW.source)).toContain(ARENA_FW.blockRate);
+test("the fw-v1 numbers are the exact cells of the --all-attacks row, and the natural run's failure is the doc's", () => {
+  const rows = read(ARENA_FW.source).split("\n");
+  const all = rows.find(r => r.startsWith(`| ${ARENA_FW.version}, \`--all-attacks\` |`));
+  expect(all).toBeDefined();
+  expect(all).toContain("| 1.00 | 0.03 | 162 | 200 |");
+  expect(all).toContain("All 6 false positives were degraded judge calls that failed closed");
+  expect(ARENA_FW.blocked).toBe("162/162");
+  expect(ARENA_FW.falsePositives).toBe("6/200");
+  const natural = rows.find(r => r.startsWith(`| ${ARENA_FW.version} |`));
+  expect(natural).toContain(`| 1.00 | 0.005 | ${ARENA_FW.naturalReached} | 200 |`);
+  expect(natural).toContain("**FAIL on n_attack.**");
+  // the line the site shows: no bare percentage
+  expect(ARENA_FW.line).not.toMatch(/%/);
+  expect(ARENA_FW.line).toBe("162/162 blocked · single-turn · fw-v1 · our own attack set, guard assumed fooled (--all-attacks) · false positives 6/200, all degraded calls that failed closed");
 });
 
 test("the guardedCall snippet uses the real export and the general-mode policy from the docs", () => {

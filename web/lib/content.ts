@@ -53,5 +53,13 @@ export const PUBLIC_BASELINES = {
   ],
 };
 
-// docs/firewall-versions.md: the arena number for fw-v1 does not exist yet.
-export const ARENA_FW = { source: "docs/firewall-versions.md", version: "fw-v1", blockRate: "not yet measured" };
+// docs/firewall-versions.md, the fw-v1 `--all-attacks` row (| 1.00 | 0.03 | 162 | 200 |): every attack scored as if the guard had
+// been fooled. The natural run failed its n_attack gate: only 5 attacks got tier 1 to call the tool.
+export const ARENA_FW = {
+  source: "docs/firewall-versions.md",
+  version: "fw-v1",
+  blocked: "162/162",
+  falsePositives: "6/200",
+  naturalReached: 5,
+  line: "162/162 blocked · single-turn · fw-v1 · our own attack set, guard assumed fooled (--all-attacks) · false positives 6/200, all degraded calls that failed closed",
+};
