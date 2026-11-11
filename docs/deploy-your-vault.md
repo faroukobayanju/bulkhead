@@ -52,8 +52,20 @@ It stops at the first error.
 1. Send testnet4 coins to the printed address, one coin of at most `--max-sats` per round. A faucet such as https://coinfaucet.eu/en/btc-testnet4/ works.
 2. Have your agent call `release_funds` with 300 TGas, never max gas. `scripts/spike-s1/release.sh` shows the whole path: call, assemble the signed transaction, broadcast.
 
+## With a TEE agent (`--tee`)
+
+`--tee` builds the vault without `register_agent_stub` and with a 60 s timelock (testnet only; mainnet keeps 24 h). The agent then registers itself:
+
+1. Boot the agent in a Phala CVM and send its implicit account 0.6 NEAR. Registering needs about 0.31 NEAR free.
+2. Its first `register_agent` call fails, because nothing is approved yet. The call's arguments hold its attestation: read the measurements (`mrtd`, `rtmr0`–`rtmr2`, the `key-provider` event digest, `compose_hash`) and the PPID from it, as in spike S3 (`docs/spikes.md`).
+3. As owner, call `propose_measurements` and `propose_ppids`, wait 60 s, then `approve_measurements` and `approve_ppids`. The agent's next attempt registers.
+4. Check with `get_agent` and `bun scripts/check-agent-key.ts <agent> --vault <vault>`.
+
 ## Limits
 
 - **Testnet only.** The script refuses `.near` accounts.
-- **Stub agent registration.** This build includes the dev-only `register_agent_stub`, so the owner can register any agent. Real agents call `register_agent` from inside their TEE with a Phala attestation, which the vault checks against owner-approved measurements and PPIDs. Mainnet builds never include the stub.
+- **Stub agent registration.** Without `--tee`, the build includes the dev-only `register_agent_stub`, so the owner can register any agent. Real agents call `register_agent` from inside their TEE with a Phala attestation, which the vault checks against owner-approved measurements and PPIDs. Mainnet builds never include the stub.
+- **A registration lasts 7 days.** The agent renews it with `register_agent`. A renewal re-sends the same quote, so the 7 days bound how long an approval holds; they do not prove the quote is fresh. A stub registration also lasts 7 days and cannot renew itself: re-run `register_agent_stub` before it runs out.
+- **The agent's gas allowance cannot be topped up.** Once the agent has deleted its full-access key, nobody can add allowance to its function-call key. If the allowance runs out, start a new agent: new implicit account, new registration.
+- **Every reboot is a new agent.** A TEE agent derives a fresh implicit account at each boot, which needs funding and registration again. Its measurements and PPID stay approved, so it registers on its first try.
 - **Bitcoin tiers only.** Base (USDC) tiers need `evm` settings in `configure_tier` and are not covered by this script yet.
