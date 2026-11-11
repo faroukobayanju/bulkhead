@@ -1,5 +1,5 @@
 {
-  "config": { "timelock_ns": 86400000000000, "mainnet": false, "stub_attestation": false, "locked": true, "paused": false },
+  "config": { "timelock_ns": 86400000000000, "mainnet": false, "stub_attestation": false, "locked": false, "paused": false },
   "codehash_approved": true,
   "tiers": [
     { "id": 1, "chain": "Bitcoin", "derivation_path": "bulkhead-tier-1", "address": "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", "status": "Open", "max_release": "33000", "cooldown_s": 3600, "rounds_left": 4, "cooldown_until_ns": 0, "evm": null },

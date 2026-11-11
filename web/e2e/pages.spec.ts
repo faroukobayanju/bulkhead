@@ -97,6 +97,22 @@ test.describe("verify", () => {
     await expect(list.locator("li", { hasText: "tdx_quote_signature_and_tcb_status" })).toContainText("not verified");
   });
 
+  test("no TEE claim, the codehash is reported not proven, unchecked rows say so, unlocked tiers never pass", async ({ page }) => {
+    await page.goto("/verify");
+    await expect(page.getByTestId("tee-row")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Agent runs in a TEE: not yet (testnet, stub codehash)" })).toBeVisible();
+    const code = page.locator("li", { has: page.getByRole("heading", { name: "Codehash the agent reports is approved" }) });
+    await expect(code.getByLabel("Reported")).toBeVisible();
+    await expect(code.getByLabel("Passes")).toHaveCount(0);
+    for (const t of ["Vault account has 0 full-access keys", "On-chain code_hash equals the reproducible wasm build", "Agent key is function-call only"]) {
+      await expect(page.locator("li", { has: page.getByRole("heading", { name: t }) })).toContainText("Not checked on this page yet.");
+    }
+    const settings = page.locator("li", { has: page.getByTestId("settings-row") });
+    await expect(settings).toContainText("Tiers are not locked yet");
+    await expect(settings.getByLabel("Passes")).toHaveCount(0);
+    await expect(page.locator("main")).not.toContainText(/TEE verified|attested/i);
+  });
+
   test("the attestation JSON downloads", async ({ page }) => {
     await page.goto("/verify");
     const [d] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: "Download attestation JSON" }).click()]);

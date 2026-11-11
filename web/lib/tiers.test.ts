@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatNative, mergePot, potText, tierStatus, type ContractTier } from "./tiers";
+import { formatNative, mergePot, potText, span, tierStatus, type ContractTier } from "./tiers";
 
 const NOW = Date.UTC(2026, 10, 10, 12, 0, 0);
 const base: ContractTier = {
@@ -30,6 +30,14 @@ describe("tierStatus", () => {
   test("contract state that cannot be read is unknown, never open", () => {
     expect(tierStatus(undefined, on).status).toBe("unknown");
   });
+});
+
+test("span: a length of time in words, for timelocks and cooldowns", () => {
+  expect(span(86_400)).toBe("24 hours");
+  expect(span(3600)).toBe("1 hour");
+  expect(span(60)).toBe("60 seconds");
+  expect(span(1)).toBe("1 second");
+  expect(span(5400)).toBe("90 minutes");
 });
 
 describe("pots", () => {

@@ -45,6 +45,12 @@ export function tierStatus(t: ContractTier | null | undefined, o: { paused: bool
   return until > o.nowMs ? { status: "cooling", nextRoundAt: until } : { status: "open" };
 }
 
+// Seconds in words, in the largest whole unit: "24 hours", "90 minutes", "60 seconds".
+export function span(s: number): string {
+  const [n, unit] = s % 3600 === 0 ? [s / 3600, "hour"] : s % 60 === 0 && s >= 120 ? [s / 60, "minute"] : [Math.round(s), "second"];
+  return `${n} ${unit}${n === 1 ? "" : "s"}`;
+}
+
 // ---- pots ----
 export type Pot = { native: string; usd: number | null };
 export type PotState = { pot: Pot | null; at: string | null; stale: boolean };

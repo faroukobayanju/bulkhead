@@ -9,6 +9,7 @@ import { callAgent } from "@/lib/agent";
 import { codehashApproved, isMock, loadArena } from "@/lib/arena";
 import { broadcastUrl, CHAIN_OF, nearTxUrl } from "@/lib/links";
 import { loadPublic } from "@/lib/public-data";
+import { span } from "@/lib/tiers";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Verify" };
@@ -21,12 +22,13 @@ type Attestation = {
   judge_model: string;
   firewall_version: string;
   mock: boolean;
-  verification: { verified: string[]; not_verified: string[] };
+  tee?: boolean;
+  verification:{ verified: string[]; not_verified: string[] };
 };
 // ok: a check this page ran and passed. info: a value reported by the agent or the contract, shown so you can compare it.
 type Tone = "ok" | "bad" | "none" | "warn" | "info";
 const ICON = { ok: CheckCircle, bad: XCircle, none: MinusCircle, warn: Warning, info: Info };
-const WORD = { ok: "Passes", bad: "Fails", none: "Not checked", warn: "Partly checked", info: "Reported" };
+const WORD = { ok: "Passes", bad: "Fails", none: "Not checked", warn: "Needs attention", info: "Reported" };
 
 async function attestation(): Promise<Attestation | null> {
   try {
@@ -74,6 +76,7 @@ export default async function VerifyPage() {
   const digestMatch = digest && att ? digest.replace(/^sha256:/, "") === att.codehash.replace(/^sha256:/, "") : null;
   const mismatch = approved === false || digestMatch === false;
   const cfg = arena.config;
+  const tee = att?.tee === true; // no agent build reports this yet (Task 10)
   const net = arena.network;
 
   return (
@@ -98,9 +101,15 @@ export default async function VerifyPage() {
       )}
 
       <ul className="checklist">
+        <Row tone={tee ? "info" : "warn"} title={tee ? "Agent runs in a TEE: reported by the agent's /attestation" : "Agent runs in a TEE: not yet (testnet, stub codehash)"} testId="tee-row">
+          {tee
+            ? "The agent's /attestation says it runs in a TEE. This page does not check that itself."
+            : "The agent runs on an ordinary server. The testnet vault registered it with a stub codehash, so the codehash below is a label the agent reports, not a measurement of the code it runs."}
+        </Row>
+        {/* Reported, not proven: without a TEE, the agent says which codehash it runs and the contract says that codehash is approved. */}
         <Row
-          tone={approved === true ? "ok" : approved === false ? "bad" : "none"}
-          title="Running codehash is approved in the vault contract"
+          tone={approved === false ? "bad" : approved === true ? "info" : "none"}
+          title="Codehash the agent reports is approved"
           raw={att ? { codehash: att.codehash, is_codehash_approved: approved ?? "unreadable" } : undefined}
         >
           <span data-testid="codehash-match">{approved === true ? "Match" : approved === false ? "Mismatch" : "Unknown: the agent or the contract cannot be read right now"}</span>
@@ -172,10 +181,10 @@ export default async function VerifyPage() {
             ))}
           </ul>
         </Row>
-        <Row tone={!cfg ? "none" : cfg.stub_attestation || cfg.paused ? "warn" : "ok"} title="Vault contract settings" raw={cfg ?? undefined}>
+        <Row tone={!cfg ? "none" : cfg.stub_attestation || cfg.paused || !cfg.locked ? "warn" : "ok"} title="Vault contract settings" raw={cfg ?? undefined} testId="settings-row">
           {cfg ? (
             <>
-              {cfg.locked ? "Tiers are locked." : "Tiers are not locked yet."} {cfg.paused ? "The vault is paused." : "Not paused."} Owner timelock {cfg.timelock_ns / 3.6e12} h.
+              {cfg.locked ? "Tiers are locked." : "Tiers are not locked yet: the owner can still change them."} {cfg.paused ? "The vault is paused." : "Not paused."} Owner timelock {span(cfg.timelock_ns / 1e9)}.
               {cfg.stub_attestation && " This build accepts agents without a real TEE attestation (stub_attestation)."}
             </>
           ) : (
@@ -183,6 +192,12 @@ export default async function VerifyPage() {
           )}
         </Row>
         <Row tone="none" title="Agent key is function-call only">
+          Not checked on this page yet.
+        </Row>
+        <Row tone="none" title="Vault account has 0 full-access keys">
+          Not checked on this page yet.
+        </Row>
+        <Row tone="none" title="On-chain code_hash equals the reproducible wasm build">
           Not checked on this page yet.
         </Row>
         <Row tone={arena.pending === null ? "none" : arena.pending.length ? "warn" : "ok"} title="Pending owner actions" raw={arena.pending ?? undefined}>
