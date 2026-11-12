@@ -17,6 +17,23 @@ The money sits in a NEAR contract, not with the agent. Each tier's Bitcoin or Ba
 
 Proof so far: the vault signed Bitcoin testnet4 payout [`a8ecea7c…8b1a`](https://mempool.space/testnet4/tx/a8ecea7c06b387f86349322cf025233c3f170e69a2a31f27e274e70ae89e8b1a) with no person holding the key, and an agent registered on testnet from a real Phala TEE. Details: `docs/vault.md`.
 
+### Live on testnet
+
+The vaults run on NEAR testnet and hold real Bitcoin testnet4 coins. Each tier's coin is shown on mempool.space, and every call to the vault on nearblocks.
+
+| Vault | Agent | Tier | Bitcoin testnet4 address | Cap per payout | Cooldown, rounds |
+| --- | --- | --- | --- | --- | --- |
+| [`vault5.bulkhead-haikeys.testnet`](https://testnet.nearblocks.io/address/vault5.bulkhead-haikeys.testnet) | registered from a Phala TEE, no stub | 1 | [`tb1qmhmy0f…cchnv`](https://mempool.space/testnet4/address/tb1qmhmy0fv9u5392zl2kv5mj6kqxk3kyqtk6cchnv) | 250,000 sats | 60 s, 5 |
+| | | 3 | [`tb1qwyt0fq…k5fnj`](https://mempool.space/testnet4/address/tb1qwyt0fqlv4v6tasfd8f636e5smz6szv68fk5fnj) | 350,000 sats | 60 s, 5 |
+| [`vault6.bulkhead-haikeys.testnet`](https://testnet.nearblocks.io/address/vault6.bulkhead-haikeys.testnet) | registered by the owner (stub build), for the attack demo | 1 | [`tb1ql5rtpm…wgr99`](https://mempool.space/testnet4/address/tb1ql5rtpmhyfflx27ct6a90v2976pcvka2tuwgr99) | 350,000 sats | 60 s, 5 |
+
+Both vaults run the same contract; `vault6` only adds the dev-only `register_agent_stub`, so the attack demo can sign with an ordinary key. The short cooldowns are for the demo. To check a vault's rules yourself:
+
+```bash
+near contract call-function as-read-only vault5.bulkhead-haikeys.testnet get_tier json-args '{"id":1}' network-config testnet now
+near contract call-function as-read-only vault5.bulkhead-haikeys.testnet get_config json-args '{}' network-config testnet now
+```
+
 ### What the agent's key can and cannot do
 
 The agent's NEAR account has one key: a function-call key. `bun scripts/check-agent-key.ts <agent> --vault <vault>` checks it.
