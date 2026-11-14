@@ -1,14 +1,22 @@
 <img src="assets/brand/wordmark.svg" alt="Bulkhead" width="320">
 
-When your AI agent gets tricked, only one compartment floods. Bulkhead is a firewall and contract-enforced spending cap for agents that hold money, proven in **Drain Me**, its live arena. Built for NEAR HACKATHON (Nov 1–14, 2026).
+When your AI agent gets tricked, only one compartment floods. Bulkhead is a firewall and a contract-enforced spending cap for AI agents that hold money, tested in public in **Drain Me**, an arena where anyone can try to talk AI guards into paying out. Built by Farouk and haikeys for NEAR HACKATHON (Nov 1 to 14, 2026).
 
-AI guards hold Bitcoin testnet4 coins in a NEAR vault contract. Attackers try to talk them into paying out.
+**Testnet only.** Everything runs on NEAR testnet with Bitcoin testnet4 coins. No real money is at stake.
 
-**Testnet only.** Drain Me runs on NEAR testnet with Bitcoin testnet4 coins (tiers 1 and 3; the Base USDC tier is off). Nothing is on mainnet and no real money is at stake. Mainnet may come after judging, after an outside review of the contract. Every attack feeds an open dataset and a firewall API with a measured block rate.
+| | |
+| --- | --- |
+| Live agent (Phala TEE) | [`/health`](https://8d9444ffca5e49147919faf500e93ccecf46f264-8787.dstack-pha1-prod9.phala.network/health) |
+| Vault with the TEE agent | [`vault5.bulkhead-haikeys.testnet`](https://testnet.nearblocks.io/address/vault5.bulkhead-haikeys.testnet) |
+| Every claim, with tx evidence | [`docs/claims.md`](docs/claims.md) |
+| Run it yourself in one command | [Try it](#try-it) |
 
-Builders can call the same API with their own tools and rules. See `docs/firewall-api.md`.
+## Quick links for judges
 
-**Status:** in development. The repository was created on 2026-10-29, inside the eligible window that HACKATHON.md Q-001 opens on 2026-10-19, so all code here is new work. There is no pre-hackathon baseline.
+- **What is proven, and what is not:** [`docs/claims.md`](docs/claims.md). Nothing is claimed outside it.
+- **The attack demo on testnet:** over the cap refused (`ERR_OVER_CAP`), a real 313,261-sat Bitcoin testnet4 payout within the cap, then refused again (`ERR_COOLDOWN`). Tx hashes in [`docs/claims.md`](docs/claims.md).
+- **The agent in a TEE:** registered with the vault from a Phala TDX machine by attestation, then left with one key that can only call the vault. [`docs/deploy-tee-agent.md`](docs/deploy-tee-agent.md).
+- **The firewall's measured accuracy:** 37 of 40 attacks stopped and 39 of 40 normal requests allowed on 80 held-out cases. [`docs/eval-general.md`](docs/eval-general.md).
 
 ## The problem
 AI agents that hold money get talked into paying. Freysa lost its pool to one crafted message, and most agents keep their spending limit in their own server code, where the same trick or a server compromise gets around it.
@@ -96,12 +104,33 @@ The other way to do this is the policy controls an agent framework offers, such 
 
 Left out on purpose: a recipient allowlist (in Drain Me the attacker names their own address), recipient scoring, reputation, and a general policy engine.
 
-## For contributors
-1. `docs/specs/2026-10-29-drain-me-spec.md`: what we are building and why.
-2. `docs/superpowers/plans/2026-10-29-drain-me.md`: the task-by-task build plan. **Task 15 (engineering amendments) overrides earlier task text where they conflict.**
-3. `HANDOFF.md`: who builds what, and the day-2 interface freeze.
-4. `docs/prior-art.md`, `TODOS.md`.
-5. `docs/vault.md` (the contract), `docs/deploy-your-vault.md` (deploy your own on testnet), `docs/launch-checklist.md` (every launch step and who signs it off).
+## Documentation
+
+| Doc | What it covers |
+| --- | --- |
+| [`docs/claims.md`](docs/claims.md) | Every claim with its evidence (txs, commits, test output), and what is not done |
+| [`docs/vault.md`](docs/vault.md) | The vault contract: tiers, cap, cooldown, timelocks, Chain Signatures payouts |
+| [`docs/deploy-your-vault.md`](docs/deploy-your-vault.md) | How to deploy your own vault on testnet |
+| [`docs/deploy-tee-agent.md`](docs/deploy-tee-agent.md) | How to run the agent in a Phala TEE and register it by attestation |
+| [`docs/firewall-api.md`](docs/firewall-api.md) | The firewall API (`/v1/check`) for your own agent, tools and rules |
+| [`docs/eval-general.md`](docs/eval-general.md), [`docs/firewall-versions.md`](docs/firewall-versions.md), [`docs/public-baselines.md`](docs/public-baselines.md) | How the firewall is measured, version by version, and against public datasets |
+| [`docs/spikes.md`](docs/spikes.md) | Early experiments: the first contract-signed Bitcoin payout, model choice, the TEE spike |
+| [`docs/prior-art.md`](docs/prior-art.md) | Related work and how Bulkhead differs |
+| [`data/README.md`](data/README.md), [`dataset/README.md`](dataset/README.md) | Test sets and the open attempt dataset |
+
+## Repository map
+
+| Folder | Contents |
+| --- | --- |
+| `contracts/vault` | The NEAR vault contract (Rust) |
+| `contracts/shade-attestation` | Vendored TDX attestation checker (NEAR One, MIT) |
+| `agent` | The agent: firewall, judge, TEE boot, chain clients, HTTP API |
+| `web` | The Drain Me website (Next.js) |
+| `convex` | Attempt storage and rate limits |
+| `shared` | Types shared by the agent and the website |
+| `scripts` | Deploy, demo, evaluation and checking scripts |
+| `deploy/phala` | The measured compose file for the TEE |
+| `data`, `dataset` | Test sets and the open dataset |
 
 ## Run locally (mock model, no keys)
 Needs [Bun](https://bun.sh) and a free Convex account. The agent runs against canned model replies, so no NEAR AI key or wallet is involved.

@@ -1,4 +1,4 @@
-# The Bulkhead agent on an ordinary host (testnet fallback, docs/superpowers/plans/2026-11-11-testnet-fallback-launch.md).
+# The Bulkhead agent on an ordinary host (the testnet fallback; the TEE build is deploy/phala).
 # Secrets come from the host's env at run time, never from the image.
 FROM oven/bun:1.3.14-slim
 WORKDIR /app
