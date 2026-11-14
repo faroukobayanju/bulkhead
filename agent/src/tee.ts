@@ -40,7 +40,9 @@ async function json(res: Response, what: string): Promise<any> {
   return res.json();
 }
 
-const dstack = (f: typeof fetch, path: string, body: unknown) => f(`http://localhost/${path}`, { method: "POST", ...DSTACK, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) } as RequestInit);
+// The guest agent answers in protobuf unless the request says JSON, as the dstack SDK does.
+const dstack = (f: typeof fetch, path: string, body: unknown) =>
+  f(`http://localhost/${path}`, { method: "POST", ...DSTACK, headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) } as RequestInit);
 async function tcbInfo(f: typeof fetch): Promise<any> {
   const info = await json(await dstack(f, "Info", {}), "dstack Info");
   return typeof info.tcb_info === "string" ? JSON.parse(info.tcb_info) : info.tcb_info;

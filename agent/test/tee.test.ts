@@ -40,6 +40,7 @@ function fakeNet(o: { approved?: (unknown[] | "down")[]; balances?: bigint[]; re
     const u = String(url);
     if (u.startsWith("http://localhost/")) {
       expect(init.unix).toBe("/var/run/dstack.sock");
+      expect(init.headers?.["content-type"]).toBe("application/json"); // else the guest agent answers in protobuf
       if (u.endsWith("/Info")) return Response.json({ tcb_info: JSON.stringify({ ...fixture.tcb_info, extra: "ignored" }) });
       quotes.push(JSON.parse(init.body).report_data);
       return Response.json({ quote: "0x" + Buffer.from(fixture.quote).toString("hex"), event_log: "[]" });
