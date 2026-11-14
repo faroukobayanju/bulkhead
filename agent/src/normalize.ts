@@ -26,21 +26,33 @@ const MORSE: Record<string, string> = {
   "-.":"N","---":"O",".--.":"P","--.-":"Q",".-.":"R","...":"S","-":"T","..-":"U","...-":"V",".--":"W","-..-":"X","-.--":"Y","--..":"Z",
   "-----":"0",".----":"1","..---":"2","...--":"3","....-":"4",".....":"5","-....":"6","--...":"7","---..":"8","----.":"9",
 };
-// The tool name is matched on letters alone, so spacing, punctuation and junk between its letters ("release - funds",
-// "r e l e a s e f u n d s", "release_ funds") cannot hide it. Runs after clean(), so confusables are already folded.
-// Known false-positive class: adjacent words that spell it across a boundary ("press release. Funds raised", "more lease funds").
-const TOOL_LETTERS = "releasefunds";
-const mentions = (s: string) => s.replace(/[^A-Za-z]/g, "").toLowerCase().includes(TOOL_LETTERS);
+// Watched tool names are matched on letters alone, so spacing, punctuation and junk between their letters ("release - funds",
+// "r e l e a s e f u n d s", "release_ funds") cannot hide them. Runs after clean(), so confusables are already folded.
+// Known false-positive class: adjacent words that spell one across a boundary ("press release. Funds raised", "more lease funds").
+type Watch = string[]; // letters-only, lowercase
+const lettersOf = (s: string) => s.replace(/[^A-Za-z]/g, "").toLowerCase();
+const DEFAULT_WATCH: Watch = ["releasefunds"];
+// Under 5 letters, matching on letters alone would fire on ordinary words ("pay" in "repay"), so those names are not watched.
+// Names are compared as text and never compiled into a regex. (clean is a const defined below; this runs only at call time.)
+const toWatch = (tools?: string[]): Watch => (tools ? tools.map(t => lettersOf(clean(t))).filter(l => l.length >= 5) : DEFAULT_WATCH);
+const mentions = (s: string, w: Watch) => {
+  const l = lettersOf(s);
+  return w.some(t => l.includes(t));
+};
 // [start, end) of the first mention in `s`, for cutting a bounded segment around it.
-function toolSpan(s: string): [number, number] | null {
+function toolSpan(s: string, w: Watch): [number, number] | null {
   const letters: string[] = [], at: number[] = [];
   for (const m of s.matchAll(/[A-Za-z]/g)) { letters.push(m[0].toLowerCase()); at.push(m.index); }
-  const k = letters.join("").indexOf(TOOL_LETTERS);
-  return k < 0 ? null : [at[k]!, at[k + TOOL_LETTERS.length - 1]! + 1];
+  const joined = letters.join("");
+  for (const t of w) {
+    const k = joined.indexOf(t);
+    if (k >= 0) return [at[k]!, at[k + t.length - 1]! + 1];
+  }
+  return null;
 }
-// Bounded segment (64 chars before, 128 after) around the first mention in `s`; `s` itself must mention the tool.
-const around = (s: string) => {
-  const [a, b] = toolSpan(s)!;
+// Bounded segment (64 chars before, 128 after) around the first mention in `s`; `s` itself must mention a watched tool.
+const around = (s: string, w: Watch) => {
+  const [a, b] = toolSpan(s, w)!;
   return s.slice(Math.max(0, a - 64), b + 128);
 };
 
@@ -91,7 +103,7 @@ type Candidate = Decoded & { report: boolean };
 
 // One decoding layer of `raw`. Values are raw decodes (invalid UTF-8 becomes replacement characters); callers clean them.
 // `report: false` marks decodes that are only worth recursing into.
-function layer(raw: string): Candidate[] {
+function layer(raw: string, w: Watch): Candidate[] {
   const out: Candidate[] = [];
   const add = (kind: Decoded["kind"], value: string, report = true) => out.push({ kind, value, report });
   const text = clean(raw);
@@ -131,7 +143,7 @@ function layer(raw: string): Candidate[] {
   }
   // Only the segment around the hit, not the whole message (which NFKC may have expanded).
   const r = rot13(text);
-  if (mentions(r) && !mentions(text)) add("rot13", around(r));
+  if (mentions(r, w) && !mentions(text, w)) add("rot13", around(r, w));
   return out;
 }
 
@@ -142,29 +154,30 @@ function layer(raw: string): Candidate[] {
 //   readable() often enough to bury real signals).
 // - U+FFFD means invalid bytes, usually a misaligned prefix: judge the stretches between the junk, which must name the
 //   tool or be 16+ chars of plain readable ASCII. If junk splits the tool name itself, report a segment around it.
-function reportable(value: string): string[] {
+function reportable(value: string, w: Watch): string[] {
   // readable() judges the value as decoded, control bytes counting against it: collapsing them to spaces first would
   // turn noise full of control bytes into "readable" text (random 16-char tokens did, about 1 in 10,000).
-  const ok = (v: string) => mentions(v) || (readable(value) && (PLAIN.test(v) || v.length >= 16));
+  const ok = (v: string) => mentions(v, w) || (readable(value) && (PLAIN.test(v) || v.length >= 16));
   if (!value.includes(REPLACEMENT)) {
     const spaced = value.replace(CONTROL, " "), stripped = value.replace(CONTROL, "");
     return (stripped === spaced ? [spaced] : [spaced, stripped]).filter(ok);
   }
-  const parts = value.split(GARBAGE).filter(f => mentions(f) || (f.length >= 16 && PLAIN.test(f) && readable(f)));
-  if (!mentions(value) || parts.some(mentions)) return parts;
-  return [around(value.split(GARBAGE).join("")), ...parts];
+  const parts = value.split(GARBAGE).filter(f => mentions(f, w) || (f.length >= 16 && PLAIN.test(f) && readable(f)));
+  if (!mentions(value, w) || parts.some(p => mentions(p, w))) return parts;
+  return [around(value.split(GARBAGE).join(""), w), ...parts];
 }
 
 // Recurse into every decoded layer, readable or not (a hex or base64 string wrapping the real payload is unreadable).
 // Work stays O(input): each layer's decodes together are a constant factor of the layer, and depth is capped.
-function collect(raw: string, depth: number, out: Decoded[]) {
-  for (const c of layer(raw)) {
-    if (c.report) for (const value of reportable(clean(c.value))) out.push({ kind: c.kind, value });
-    if (depth + 1 < MAX_DEPTH) collect(c.value, depth + 1, out);
+function collect(raw: string, depth: number, out: Decoded[], w: Watch) {
+  for (const c of layer(raw, w)) {
+    if (c.report) for (const value of reportable(clean(c.value), w)) out.push({ kind: c.kind, value });
+    if (depth + 1 < MAX_DEPTH) collect(c.value, depth + 1, out, w);
   }
 }
 
-export function normalize(input: string) {
+export function normalize(input: string, opts: { tools?: string[] } = {}) {
+  const w = toWatch(opts.tools);
   const flags = new Set<string>();
   if (input.search(INVISIBLE) >= 0) flags.add("zero_width"); // not .test: a /g regex keeps lastIndex across calls
   const stripped = input.replace(INVISIBLE, "");
@@ -173,10 +186,10 @@ export function normalize(input: string) {
   if (text !== nfkc || lettersChanged(stripped)) flags.add("homoglyph");
 
   const all: Decoded[] = [];
-  collect(input, 0, all);
+  collect(input, 0, all, w);
   if (all.length) flags.add("encoded_payload");
-  const tool = new Set(all.filter(d => mentions(d.value)));
-  if (mentions(text) || tool.size) flags.add("tool_name_mention");
+  const tool = new Set(all.filter(d => mentions(d.value, w)));
+  if (mentions(text, w) || tool.size) flags.add("tool_name_mention");
 
   // Flags above saw the full values; only now clip what leaves this function.
   const clippedText = clip(text, MAX_TEXT_BYTES);

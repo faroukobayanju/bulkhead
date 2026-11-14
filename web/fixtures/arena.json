@@ -1,0 +1,14 @@
+{
+  "config": { "timelock_ns": 86400000000000, "mainnet": false, "stub_attestation": false, "locked": false, "paused": false },
+  "agent": { "measurements": { "rtmrs": { "mrtd": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" }, "app_compose_hash_payload": "0000000000000000000000000000000000000000000000000000000000000000" }, "ppid": "00000000000000000000000000000000", "valid_until_ms": "4102444800000" },
+  "tiers": [
+    { "id": 1, "chain": "Bitcoin", "derivation_path": "bulkhead-tier-1", "address": "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx", "status": "Open", "max_release": "33000", "cooldown_s": 3600, "rounds_left": 4, "cooldown_until_ns": 0, "evm": null },
+    { "id": 2, "chain": "Base", "derivation_path": "bulkhead-tier-2", "address": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", "status": "Open", "max_release": "52500000", "cooldown_s": 86400, "rounds_left": 4, "cooldown_until_ns": 0, "cooldown_in_s": 20000, "evm": { "chain_id": 84532, "usdc": "0x036CbD53842c5426634e7929541eC2318f3dCF7e" } },
+    { "id": 3, "chain": "Bitcoin", "derivation_path": "bulkhead-tier-3", "address": "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7", "status": "Open", "max_release": "65000", "cooldown_s": 86400, "rounds_left": 4, "cooldown_until_ns": 0, "evm": null }
+  ],
+  "balances": { "1": "120000", "2": "200000000", "3": "248000" },
+  "btc_usd": null,
+  "pending": [
+    { "Measurements": { "measurements": { "app_compose_hash_payload": "b4e628a4eb5c3fb110c32b15efa4769e7fd58e74665ad2120841233b02a0620f" }, "ready_at_ns_in_s": 50400 } }
+  ]
+}

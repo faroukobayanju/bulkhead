@@ -456,7 +456,7 @@ describe("checkFirewall scans proposed_action args like a message", () => {
     ["a testnet address", { recipient: "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx" }],
     ["an EVM address", { recipient: "0x52908400098527886E0F7030069857D2E4169EE7", usdc_amount: "62000000" }],
     ["a lowercase EVM address", { recipient: "0x52908400098527886e0f7030069857d2e4169ee7" }],
-    ["a .near account", { account: "alice.near", recipient: "vault-drainme.testnet" }],
+    ["a .near account", { account: "alice.near", recipient: "vault-bulkhead.testnet" }],
     ["a sha256 hash", { sighash: sha256hex, txid: sha256hex }],
     ["a ULID attempt id", { attempt_id: "01HZX3K9T2V8Q4R5N6M7P8W9YA", tier: 3 }],
     ["a base64 signature", { signature: Buffer.alloc(64, 7).toString("base64"), public_key: "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp" }],

@@ -6,7 +6,7 @@ import { memoryCounter, utcDay, type Counter } from "../src/counter";
 import { firewallRoutes } from "../src/firewall/api";
 import { makeBudget } from "../src/firewall/budget";
 import { SlidingWindow } from "../src/firewall/window";
-import { canonicalJson, type Judge } from "../src/firewall/verdict";
+import { canonicalJson, inputHash, type Judge } from "../src/firewall/verdict";
 
 const SECRET = "proxy-secret-0123456789";
 const KEY_A = "dm_live_key_A_secret";
@@ -43,7 +43,7 @@ function setup(o: { limits?: object; judge?: Judge; keys?: (k: string) => Promis
       ...(body instanceof ReadableStream ? { duplex: "half" } : {}),
     } as RequestInit);
   const withKey = (body: Body = MSG, key = KEY_A) => post(body, { "x-api-key": key });
-  const playground = (body: Body = MSG, ip = "203.0.113.7", secret = SECRET) => post(body, { "x-drainme-proxy-secret": secret, "x-real-ip": ip });
+  const playground = (body: Body = MSG, ip = "203.0.113.7", secret = SECRET) => post(body, { "x-bulkhead-proxy-secret": secret, "x-real-ip": ip });
   return { app, post, withKey, playground, clock, counter, seen, budget };
 }
 type Body = string | ReadableStream | object;
@@ -190,7 +190,7 @@ describe("playground", () => {
 
   test("a valid secret and no x-real-ip is 400; so is a value that is not an IP", async () => {
     const s = setup();
-    const none = await s.post(MSG, { "x-drainme-proxy-secret": SECRET });
+    const none = await s.post(MSG, { "x-bulkhead-proxy-secret": SECRET });
     expect(none.status).toBe(400);
     expect(await errCode(none)).toBe("bad_client_ip");
     for (const ip of ["not-an-ip", "1.2.3", "999.1.1.1", "1.1.1.1, 2.2.2.2", " "]) expect((await s.playground(MSG, ip)).status).toBe(400);
@@ -251,7 +251,7 @@ describe("playground", () => {
 
   test("an API key from the same proxy is treated as an API key, not a playground call", async () => {
     const s = setup();
-    for (let i = 0; i < 6; i++) expect((await s.post(MSG, { "x-api-key": KEY_A, "x-drainme-proxy-secret": SECRET, "x-real-ip": "203.0.113.7" })).status).toBe(200);
+    for (let i = 0; i < 6; i++) expect((await s.post(MSG, { "x-api-key": KEY_A, "x-bulkhead-proxy-secret": SECRET, "x-real-ip": "203.0.113.7" })).status).toBe(200);
   });
 });
 
@@ -629,5 +629,114 @@ describe("keys are never logged", () => {
     const s = setup({ keys: async () => { throw new Error(`lookup ${KEY_A}`); } });
     const r = await s.withKey();
     expect(await r.text()).not.toContain(KEY_A);
+  });
+});
+
+describe("key lookups are cached and limited before Convex", () => {
+  const withIp = (s: ReturnType<typeof setup>, key: string, ip = "203.0.113.7") => s.post(MSG, { "x-api-key": key, "x-bulkhead-proxy-secret": SECRET, "x-real-ip": ip });
+  test("an unknown key is looked up once a minute however often it is sent, and tried again after", async () => {
+    let lookups = 0;
+    const s = setup({ keys: async () => (lookups++, false) });
+    for (let i = 0; i < 5; i++) expect((await s.withKey(MSG, "dm_unknown")).status).toBe(401);
+    expect(lookups).toBe(1);
+    s.clock.now += 60_001;
+    await s.withKey(MSG, "dm_unknown");
+    expect(lookups).toBe(2);
+  });
+  test("a valid key is cached for 30 s, and a failed lookup is not cached", async () => {
+    let lookups = 0;
+    let down = true;
+    const s = setup({ keys: async k => { lookups++; if (down) throw new Error("x"); return k === KEY_A; } });
+    expect((await s.withKey()).status).toBe(503);
+    expect((await s.withKey()).status).toBe(503);
+    expect(lookups).toBe(2);
+    down = false;
+    for (let i = 0; i < 3; i++) expect((await s.withKey()).status).toBe(200);
+    expect(lookups).toBe(3);
+    s.clock.now += 30_001;
+    await s.withKey();
+    expect(lookups).toBe(4);
+  });
+  test("random keys from one address stop reaching the database after 30 a minute; another address is unaffected", async () => {
+    let lookups = 0;
+    const s = setup({ keys: async () => (lookups++, false) });
+    const codes: number[] = [];
+    for (let i = 0; i < 35; i++) codes.push((await withIp(s, `dm_random_${i}`)).status);
+    expect(codes.slice(0, 30).every(c => c === 401)).toBe(true);
+    expect(codes.slice(30)).toEqual([429, 429, 429, 429, 429]);
+    expect(lookups).toBe(30);
+    const r = await withIp(s, "dm_random_x", "198.51.100.9");
+    expect(r.status).toBe(401);
+    expect(lookups).toBe(31);
+    const limited = await withIp(s, "dm_random_y");
+    expect(limited.headers.get("retry-after")).toBe("60");
+    expect(await errCode(limited)).toBe("rate_limited");
+  });
+});
+
+describe("codehash and firewall_version come from the deps, not env", () => {
+  test("a verdict carries the configured values, signed", async () => {
+    const s = setup({ deps: { codehash: "ab".repeat(32), firewallVersion: "fw-v9" } });
+    const j: any = await (await s.withKey()).json();
+    expect(j).toMatchObject({ codehash: "ab".repeat(32), firewall_version: "fw-v9" });
+  });
+});
+
+describe("policy", () => {
+  const policy = { tools: ["pay_vendor"], rules: "May pay approved vendors up to $50." };
+  const base = { messages: [{ role: "user" as const, content: "Pay acme $20." }] };
+
+  test("a valid policy returns 200 with the configured general version and a hash that covers the policy", async () => {
+    const s = setup({ deps: { generalVersion: "fw-general-v7" } });
+    const res = await s.withKey({ ...base, policy });
+    const body: any = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.firewall_version).toBe("fw-general-v7");
+    expect(body.input_hash).toBe(inputHash({ messages: base.messages, policy }));
+    expect(s.seen[0]!.policy).toEqual(policy);
+  });
+  test("without generalVersion in the deps the default is fw-general-v1", async () => {
+    const body: any = await (await setup().withKey({ ...base, policy })).json();
+    expect(body.firewall_version).toBe("fw-general-v1");
+  });
+  test("unknown policy fields are dropped before hashing", async () => {
+    const body: any = await (await setup().withKey({ ...base, policy: { ...policy, extra: 1 } })).json();
+    expect(body.input_hash).toBe(inputHash({ messages: base.messages, policy }));
+  });
+  for (const [name, bad] of [
+    ["not an object", "x"],
+    ["an array", []],
+    ["no tools", { rules: "r" }],
+    ["empty tools", { tools: [], rules: "r" }],
+    ["21 tools", { tools: Array.from({ length: 21 }, (_, i) => `tool${i}`), rules: "r" }],
+    ["tool name with a regex in it", { tools: ["a.*(b+)+"], rules: "r" }],
+    ["tool name with a quote", { tools: ['a"b'], rules: "r" }],
+    ["64 characters of quotes", { tools: ['"'.repeat(64)], rules: "r" }],
+    ["65 character tool name", { tools: ["a".repeat(65)], rules: "r" }],
+    ["empty tool name", { tools: [""], rules: "r" }],
+    ["non-string tool", { tools: [1], rules: "r" }],
+    ["no rules", { tools: ["pay_vendor"] }],
+    ["empty rules", { tools: ["pay_vendor"], rules: "" }],
+    ["non-string rules", { tools: ["pay_vendor"], rules: 5 }],
+    ["2,001 character rules", { tools: ["pay_vendor"], rules: "r".repeat(2001) }],
+  ] as [string, unknown][]) {
+    test(`${name} is a 400 and charges nothing`, async () => {
+      const s = setup({ limits: { apiKey: 1 } });
+      const res = await s.withKey({ ...base, policy: bad });
+      expect(res.status).toBe(400);
+      expect(await errCode(res)).toBe("bad_request");
+      expect(s.seen.length).toBe(0);
+      expect((await s.withKey()).status).toBe(200); // the single call of the quota is still there
+    });
+  }
+  test("the boundaries are accepted: 20 tools, a 64 character name, 2,000 characters of rules", async () => {
+    const s = setup();
+    const tools = Array.from({ length: 19 }, (_, i) => `tool${i}`).concat(["A.b:c_d-1".padEnd(64, "x")]);
+    expect((await s.withKey({ ...base, policy: { tools, rules: "r".repeat(2000) } })).status).toBe(200);
+  });
+  test("a request with no policy gets the strict version and the old hash", async () => {
+    const body: any = await (await setup().withKey(base)).json();
+    expect(body.firewall_version).toBe("fw-v1");
+    expect(body.input_hash).toBe(inputHash({ messages: base.messages }));
   });
 });

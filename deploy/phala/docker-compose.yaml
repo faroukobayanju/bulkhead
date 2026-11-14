@@ -1,0 +1,40 @@
+# The Bulkhead agent in a Phala Cloud CVM (Task 10 step 5). Deploy from the Phala dashboard with dstack 0.5.12.
+#
+# Everything that decides what the agent does is written here, because this file's hash is part of the TEE
+# measurements the vault approves: change any line and the owner has to approve new measurements.
+# Only secrets come in as encrypted env (Phala's "allowed envs"); the dashboard cannot change anything else.
+#
+# Image: built from commit afbd6d1 with `git archive HEAD | docker buildx build --platform linux/amd64 --push -`.
+# CODEHASH repeats the image digest so /attestation and every verdict name the image this CVM runs.
+services:
+  bulkhead-agent:
+    image: docker.io/faroukcodes/bulkhead-agent@sha256:53e96ec9cad48c7a3ede5d8be0bea461bfdf59f8f6d5bf7cf866cdecde518bc9
+    platform: linux/amd64
+    container_name: bulkhead-agent
+    # root inside the CVM: the dstack socket is root-only, and the image's default user is bun
+    user: "0:0"
+    restart: always
+    ports:
+      - "8787:8787"
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    environment:
+      TEE: "1"
+      NEAR_NETWORK: testnet
+      NEAR_RPC: https://rpc.testnet.fastnear.com
+      VAULT_ACCOUNT: vault5.bulkhead-haikeys.testnet
+      MEMPOOL_BASE: https://mempool.space/testnet4/api
+      TIER_ENABLED_1: "1"
+      TIER_ENABLED_2: "0"
+      TIER_ENABLED_3: "1"
+      CODEHASH: sha256:53e96ec9cad48c7a3ede5d8be0bea461bfdf59f8f6d5bf7cf866cdecde518bc9
+      FIREWALL_VERSION: fw-v1
+      # secrets, set as encrypted env in the Phala dashboard
+      NEARAI_API_KEY: ${NEARAI_API_KEY}
+      CONVEX_URL: ${CONVEX_URL}
+      CONVEX_SITE_URL: ${CONVEX_SITE_URL}
+      AGENT_SECRET: ${AGENT_SECRET}
+      PEPPER: ${PEPPER}
+      SESSION_SECRET: ${SESSION_SECRET}
+      PROXY_SECRET: ${PROXY_SECRET}
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL}

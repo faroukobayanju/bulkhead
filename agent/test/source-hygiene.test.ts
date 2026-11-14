@@ -8,7 +8,7 @@ const INVISIBLE = /[\u00AD\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u
 
 test("no source file contains a literal invisible character", () => {
   const root = fileURLToPath(new URL("../../", import.meta.url));
-  const files = ["agent/src/**/*.ts", "agent/test/**/*.ts", "shared/*.ts", "scripts/*.ts"].flatMap(g => [...new Glob(g).scanSync({ cwd: root })]);
+  const files = ["agent/src/**/*.ts", "agent/test/**/*.ts", "shared/*.ts", "scripts/*.ts", "convex/**/*.ts"].flatMap(g => [...new Glob(g).scanSync({ cwd: root })]);
   expect(files.length).toBeGreaterThan(20);
   const bad = files.filter(f => INVISIBLE.test(readFileSync(root + f, "utf8")));
   expect(bad).toEqual([]);

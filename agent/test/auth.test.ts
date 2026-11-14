@@ -63,7 +63,7 @@ describe("verifyNep413", () => {
 
   test("a signature for another message does not log anyone in", async () => {
     const now = Date.now();
-    for (const message of ["send-all-my-funds", "drainme-login ", "DRAINME-LOGIN", ""]) {
+    for (const message of ["send-all-my-funds", "bulkhead-login ", "BULKHEAD-LOGIN", ""]) {
       const nonce = makeNonce(now);
       const m = msgFor(nonce, { message, signature: sign(message, nonce) });
       expect(await verifyNep413(m, now, keyOk)).toEqual({ ok: false, reason: "bad_sig" });
@@ -353,13 +353,13 @@ describe("NEP-413 hash and nonce", () => {
   test("matches the NEP-413 byte layout", () => {
     const payload =
       "9d010080" +
-      "0d000000" + "647261696e6d652d6c6f67696e" +
+      "0e000000" + "62756c6b686561642d6c6f67696e" +
       "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" +
-      "0b000000" + "647261696e6d652e617070" +
+      "08000000" + "62756c6b68656164" +
       "00";
-    const digest = "50d62b0f9f88bc04e1a21b21c41042a125d7571845eb57708279325897b869c4";
+    const digest = "03190da9ff559e9345b31b7c0b9ea1ef8561652b870fa2550ad39f97ff83974a";
     expect(sha(payload)).toBe(digest);
-    expect(hex(nep413Hash({ message: "drainme-login", nonce: ascending, recipient: "drainme.app" }))).toBe(digest);
+    expect(hex(nep413Hash({ message: "bulkhead-login", nonce: ascending, recipient: "bulkhead" }))).toBe(digest);
   });
 
   // The Borsh spec prefixes strings with their UTF-8 byte length (10 here, not the 7 UTF-16 units).
@@ -382,22 +382,22 @@ describe("NEP-413 hash and nonce", () => {
   test("encodes a callbackUrl as Option Some", () => {
     const payload =
       "9d010080" +
-      "0d000000" + "647261696e6d652d6c6f67696e" +
+      "0e000000" + "62756c6b686561642d6c6f67696e" +
       "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" +
-      "0b000000" + "647261696e6d652e617070" +
-      "01" + "1a000000" + "68747470733a2f2f647261696e6d652e6170702f746965722f32"; // "https://drainme.app/tier/2"
-    const digest = "ea651e4837baaafe9a62b221018e12baa283558b09fb95b4d9d8ae0f89c2c421";
+      "08000000" + "62756c6b68656164" +
+      "01" + "1f000000" + "68747470733a2f2f62756c6b686561642e6578616d706c652f746965722f32"; // "https://bulkhead.example/tier/2"
+    const digest = "7de7da606690bbc70facfe1e2bb4b66018ef84ceca7470fbeb331c00c6ed9d29";
     expect(sha(payload)).toBe(digest);
-    const p = { message: "drainme-login", nonce: ascending, recipient: "drainme.app" };
-    expect(hex(nep413Hash({ ...p, callbackUrl: "https://drainme.app/tier/2" }))).toBe(digest);
+    const p = { message: "bulkhead-login", nonce: ascending, recipient: "bulkhead" };
+    expect(hex(nep413Hash({ ...p, callbackUrl: "https://bulkhead.example/tier/2" }))).toBe(digest);
     expect(hex(nep413Hash({ ...p, callbackUrl: "https://app.mynearwallet.com/login?next=%2Ftier%2F1" }))).toBe(
-      "30ea139a6b999b46057f9240ef088d5cd0eee946135c4c284630c3f2c74109b4",
+      "1e54e311ad96e297d6b68c76f82ab8902af34a731d52717e4be029bed086ffdf",
     );
   });
 
   test("an absent or undefined callbackUrl is still None", () => {
-    const none = "50d62b0f9f88bc04e1a21b21c41042a125d7571845eb57708279325897b869c4";
-    const p = { message: "drainme-login", nonce: ascending, recipient: "drainme.app" };
+    const none = "03190da9ff559e9345b31b7c0b9ea1ef8561652b870fa2550ad39f97ff83974a";
+    const p = { message: "bulkhead-login", nonce: ascending, recipient: "bulkhead" };
     expect(hex(nep413Hash(p))).toBe(none);
     expect(hex(nep413Hash({ ...p, callbackUrl: undefined }))).toBe(none);
     expect(hex(nep413Hash({ ...p, callbackUrl: "" }))).not.toBe(none); // Some("") is not None
@@ -433,6 +433,6 @@ describe("NEP-413 hash and nonce", () => {
   test("agent/src/auth re-exports the shared helpers", () => {
     expect(makeNonce).toBe(shared.makeNonce);
     expect(nep413Hash).toBe(shared.nep413Hash);
-    expect([LOGIN_MESSAGE, LOGIN_RECIPIENT]).toEqual(["drainme-login", "drainme.app"]);
+    expect([LOGIN_MESSAGE, LOGIN_RECIPIENT]).toEqual(["bulkhead-login", "bulkhead"]);
   });
 });

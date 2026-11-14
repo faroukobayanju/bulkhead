@@ -6,9 +6,10 @@ export type Technique = (typeof TECHNIQUES)[number];
 export type JudgeOut = { risk: number; technique: Technique; reason: string };
 export type Msg = { role: "system" | "user" | "assistant" | "tool"; content: string };
 export type Action = { tool: string; args: Record<string, unknown> };
+export type Policy = { tools: string[]; rules: string };
 // The signal aborts when the caller gives up (timeout), so a judge should pass it to whatever it calls.
 export type Judge = (
-  input: { messages: Msg[]; proposed_action?: Action; normalized: ReturnType<typeof normalize> },
+  input: { messages: Msg[]; proposed_action?: Action; policy?: Policy; normalized: ReturnType<typeof normalize> },
   signal: AbortSignal,
 ) => Promise<JudgeOut>;
 export const DEGRADED_REASON = "judge_unavailable";
@@ -40,10 +41,10 @@ export function canonicalJson(v: unknown): string {
   return JSON.stringify(v);
 }
 
-// The input a verdict is about: sha256 hex of the canonical JSON of the validated request ({messages, proposed_action}, unknown
-// fields already dropped, proposed_action left out when absent). A caller recomputes it from what it sent.
-export const inputHash = (req: { messages: Msg[]; proposed_action?: Action }) =>
-  createHash("sha256").update(canonicalJson({ messages: req.messages, proposed_action: req.proposed_action })).digest("hex");
+// The input a verdict is about: sha256 hex of the canonical JSON of the validated request ({messages, proposed_action, policy}, unknown
+// fields already dropped, absent fields left out). A caller recomputes it from what it sent.
+export const inputHash = (req: { messages: Msg[]; proposed_action?: Action; policy?: Policy }) =>
+  createHash("sha256").update(canonicalJson({ messages: req.messages, proposed_action: req.proposed_action, policy: req.policy })).digest("hex");
 
 // ed25519 over sha256(canonical_json(response without signature)), base64. `signer` is part of the signed bytes.
 export async function signResponse<T extends Record<string, unknown>>(body: T, signer: string, sign: Sign) {

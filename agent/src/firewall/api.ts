@@ -5,14 +5,16 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { normalize } from "../normalize";
 import type { Budget } from "./budget";
 import { heuristicScore } from "./heuristics";
-import { DEGRADED_REASON, inputHash, judgeOut, signResponse, toVerdict, type Action, type Judge, type Msg, type Sign, type Technique } from "./verdict";
-import { ipKey, type SlidingWindow } from "./window";
+import { DEGRADED_REASON, inputHash, judgeOut, signResponse, toVerdict, type Action, type Judge, type Msg, type Policy, type Sign, type Technique } from "./verdict";
+import { ipKey, SlidingWindow } from "./window";
 
 export type { Judge };
-export const FIREWALL_VERSION = process.env.FIREWALL_VERSION ?? "fw-v1";
-export const CODEHASH = process.env.CODEHASH ?? "local";
+// Defaults for tests and local use only. Production passes the real values from config (codehash, firewallVersion), never env.
+export const FIREWALL_VERSION = "fw-v1";
+export const GENERAL_VERSION = "fw-general-v1";
+export const CODEHASH = "local";
 
-export type CheckReq = { messages: Msg[]; proposed_action?: Action };
+export type CheckReq = { messages: Msg[]; proposed_action?: Action; policy?: Policy };
 export type FirewallResult = {
   verdict: "allow" | "escalate" | "block";
   risk: number;
@@ -26,26 +28,30 @@ export type FirewallResult = {
 
 // Final risk is max(heuristic, judge): a judge that was itself talked into saying 0 cannot lower the heuristic score.
 // Anything that goes wrong (judge error, timeout, output outside the contract, even a bug here) is the fail-closed block.
-export async function checkFirewall(req: CheckReq, judge: Judge, opts: { timeoutMs?: number } = {}): Promise<FirewallResult> {
+export async function checkFirewall(req: CheckReq, judge: Judge, opts: { timeoutMs?: number; codehash?: string; firewallVersion?: string; generalVersion?: string } = {}): Promise<FirewallResult> {
   const t0 = performance.now();
   const done = (r: Pick<FirewallResult, "verdict" | "risk" | "technique" | "reason" | "degraded">): FirewallResult => ({
     ...r,
-    firewall_version: FIREWALL_VERSION,
-    codehash: CODEHASH,
+    firewall_version: req.policy ? opts.generalVersion ?? GENERAL_VERSION : opts.firewallVersion ?? FIREWALL_VERSION,
+    codehash: opts.codehash ?? CODEHASH,
     latency_ms: Math.round(performance.now() - t0),
   });
   const ac = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
+    // The policy lists every tool the agent has, so anything else is not one of its actions. No judge call is needed to say so.
+    if (req.policy && req.proposed_action && !req.policy.tools.includes(req.proposed_action.tool)) {
+      return done({ verdict: "block", risk: 100, technique: "tool_spoof", reason: "proposed_action.tool is not in policy.tools", degraded: false });
+    }
     // proposed_action args are attacker-controlled text too (a memo field, a base64 blob), so they are scanned and decoded like a
     // message. The tool name is not: it is the agent's own, and the judge reads it.
     const raw = [...req.messages.map(m => m.content), ...(req.proposed_action ? [argsText(req.proposed_action.args)] : [])].join("\n");
-    const n = normalize(raw);
-    const h = heuristicScore(n, raw);
+    const n = normalize(raw, { tools: req.policy?.tools });
+    const h = heuristicScore(n, raw, req.policy?.tools);
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => (ac.abort(), reject(new Error("timeout"))), opts.timeoutMs ?? 3500);
     });
-    const j = judgeOut(await Promise.race([judge({ messages: req.messages, proposed_action: req.proposed_action, normalized: n }, ac.signal), timeout]));
+    const j = judgeOut(await Promise.race([judge({ messages: req.messages, proposed_action: req.proposed_action, policy: req.policy, normalized: n }, ac.signal), timeout]));
     const risk = Math.max(h.score, j.risk);
     const floor = h.score > j.risk; // the heuristic set the risk, so it also names the technique and the reason
     return done({
@@ -92,19 +98,37 @@ async function readBody(req: Request, max: number): Promise<Uint8Array | null> {
 // the text reads like a message. It is no longer valid JSON; it is only scanned.
 const argsText = (args: Record<string, unknown>) => JSON.stringify(args).replace(/\\(?:u[0-9a-fA-F]{4}|[^u])/g, m => JSON.parse(`"${m}"`));
 
+const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,64}$/;
+function parsePolicy(p: unknown): Policy | string {
+  if (!isObj(p)) return "policy must be {tools: string[], rules: string}";
+  const { tools, rules } = p;
+  if (!Array.isArray(tools) || tools.length < 1 || tools.length > 20) return "policy.tools must be an array of 1 to 20 tool names";
+  if (!tools.every(t => typeof t === "string" && TOOL_NAME.test(t))) return "each tool name must be 1 to 64 letters, digits, or _ . : -";
+  if (typeof rules !== "string" || rules.length < 1 || rules.length > 2000) return "policy.rules must be a string of 1 to 2,000 characters";
+  return { tools: [...tools], rules };
+}
+
 // Returns the cleaned request, or what is wrong with it. Messages and the action are rebuilt from known fields only.
 function parseReq(x: unknown): CheckReq | string {
   if (!isObj(x)) return "the body must be a JSON object";
-  const { messages, proposed_action } = x;
+  const { messages, proposed_action, policy } = x;
   if (!Array.isArray(messages) || messages.length < 1 || messages.length > 50) return "messages must be an array of 1 to 50 items";
   const clean: Msg[] = [];
   for (const m of messages) {
     if (!isObj(m) || !ROLES.includes(m.role as string) || typeof m.content !== "string") return "each message needs a role (system, user, assistant or tool) and a string content";
     clean.push({ role: m.role as Msg["role"], content: m.content });
   }
-  if (proposed_action === undefined) return { messages: clean };
-  if (!isObj(proposed_action) || typeof proposed_action.tool !== "string" || !isObj(proposed_action.args)) return "proposed_action must be {tool: string, args: object}";
-  return { messages: clean, proposed_action: { tool: proposed_action.tool, args: proposed_action.args } };
+  const req: CheckReq = { messages: clean };
+  if (proposed_action !== undefined) {
+    if (!isObj(proposed_action) || typeof proposed_action.tool !== "string" || !isObj(proposed_action.args)) return "proposed_action must be {tool: string, args: object}";
+    req.proposed_action = { tool: proposed_action.tool, args: proposed_action.args };
+  }
+  if (policy !== undefined) {
+    const p = parsePolicy(policy);
+    if (typeof p === "string") return p;
+    req.policy = p;
+  }
+  return req;
 }
 
 export type FirewallDeps = {
@@ -112,15 +136,39 @@ export type FirewallDeps = {
   keys: (apiKey: string) => Promise<boolean>; // sha256 lookup in api_keys
   limiter: SlidingWindow;
   budget: Budget;
-  proxySecret?: string; // the web proxy's x-drainme-proxy-secret; unset closes the playground
+  proxySecret?: string; // the web proxy's x-bulkhead-proxy-secret; unset closes the playground
   sign: Sign;
   signer: string;
+  codehash?: string; // from config, reported in every verdict
+  firewallVersion?: string;
+  generalVersion?: string; // reported when a request carries a policy
+  lookupLimiter?: SlidingWindow; // unknown-key lookups per client address, before Convex (default 30 a minute)
   clock?: () => number;
   timeoutMs?: number;
 };
 
+const KEY_NEG_TTL_MS = 60_000;
+const KEY_POS_TTL_MS = 30_000;
+const KEY_CACHE_MAX = 10_000;
+const LOOKUPS_PER_MIN = 30;
+
 // Nothing is logged here: Task 9's error handler decides what to record.
 export function firewallRoutes(app: Hono, deps: FirewallDeps) {
+  // Keys are looked up in Convex. Answers are cached briefly (a flood of one unknown key costs one lookup a minute) and the lookups
+  // that do reach Convex are limited per client address, so a stream of random keys cannot turn into a stream of database calls.
+  // ponytail: a revoked key still works for up to 30 s; the peer address behind a proxy is the proxy, so the limit is then shared.
+  const keyCache = new Map<string, { ok: boolean; until: number }>();
+  const lookupLimiter = deps.lookupLimiter ?? new SlidingWindow();
+  const lookup = async (apiKey: string, ip: string, now: number): Promise<boolean | "limited"> => {
+    const h = sha(apiKey).toString("hex");
+    const hit = keyCache.get(h);
+    if (hit && hit.until > now) return hit.ok;
+    if (lookupLimiter.hit(`kl:${ip}`, LOOKUPS_PER_MIN, now)) return "limited";
+    const ok = await deps.keys(apiKey);
+    if (keyCache.size >= KEY_CACHE_MAX) keyCache.delete(keyCache.keys().next().value!);
+    keyCache.set(h, { ok, until: now + (ok ? KEY_POS_TTL_MS : KEY_NEG_TTL_MS) });
+    return ok;
+  };
   const fail = (c: Context, status: ContentfulStatusCode, code: string, message: string, fix: string, headers?: Record<string, string>) =>
     c.json({ error: { code, message, fix } }, status, headers);
 
@@ -133,17 +181,21 @@ export function firewallRoutes(app: Hono, deps: FirewallDeps) {
     let keyId: string | undefined;
     let perMinute: number;
     if (apiKey) {
-      let known = false;
+      let known: boolean | "limited" = false;
+      // the address is believed only from the proxy; a direct caller is keyed by the connection's peer
+      const peer = (c.env as { requestIP?: (r: Request) => { address: string } | null } | undefined)?.requestIP?.(c.req.raw)?.address;
+      const from = sameSecret(c.req.header("x-bulkhead-proxy-secret"), deps.proxySecret) && isIP(c.req.header("x-real-ip") ?? "") ? ipKey(c.req.header("x-real-ip")!) : peer ?? "unknown";
       try {
-        known = apiKey.length <= 256 && (await deps.keys(apiKey));
+        known = apiKey.length <= 256 && (await lookup(apiKey, from, now));
       } catch {
         return fail(c, 503, "key_lookup_unavailable", "API keys cannot be checked right now.", "Retry in a moment.");
       }
+      if (known === "limited") return fail(c, 429, "rate_limited", "Too many unknown API keys from this address.", "Wait a minute, then retry with a valid key.", { "retry-after": "60" });
       if (!known) return fail(c, 401, "invalid_api_key", "Unknown API key.", "Send a valid key in the x-api-key header.");
       keyId = sha(apiKey).toString("hex").slice(0, 32);
       [id, perMinute] = [`k:${keyId}`, 60];
     } else {
-      if (!sameSecret(c.req.header("x-drainme-proxy-secret"), deps.proxySecret))
+      if (!sameSecret(c.req.header("x-bulkhead-proxy-secret"), deps.proxySecret))
         return fail(c, 401, "missing_api_key", "No API key.", "Send your key in the x-api-key header.");
       const ip = c.req.header("x-real-ip");
       if (!ip || !isIP(ip)) return fail(c, 400, "bad_client_ip", "The proxy did not send a valid x-real-ip.", "The web proxy must set x-real-ip to the client address.");
@@ -187,7 +239,7 @@ export function firewallRoutes(app: Hono, deps: FirewallDeps) {
 
     // 6. judge, then sign. A degraded block is still a 200: reason stays "judge_unavailable" and the header marks it.
     // input_hash and issued_at go inside the signed bytes, so a verdict cannot be shown next to another input or passed off as new.
-    const { degraded, ...result } = await checkFirewall(req, deps.judge, { timeoutMs: deps.timeoutMs });
+    const { degraded, ...result } = await checkFirewall(req, deps.judge, { timeoutMs: deps.timeoutMs, codehash: deps.codehash, firewallVersion: deps.firewallVersion, generalVersion: deps.generalVersion });
     const stamped = { ...result, input_hash, issued_at: Math.floor((deps.clock ?? Date.now)()) };
     try {
       return c.json(await signResponse(stamped, deps.signer, deps.sign), 200, degraded ? { "x-firewall-degraded": "1" } : undefined);

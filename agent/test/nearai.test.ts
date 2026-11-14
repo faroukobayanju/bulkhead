@@ -514,3 +514,26 @@ describe("reservation", () => {
     expect(s.alerts.length).toBe(1);
   });
 });
+
+describe("completion info (E17)", () => {
+  test("returns the completion id and the sha256 of the exact request and response bytes, and tells onCompletion", async () => {
+    const { createHash } = await import("node:crypto");
+    const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+    const seen: unknown[] = [];
+    const sent: string[] = [];
+    const wire = JSON.stringify({ id: "chatcmpl-1", ...reply() });
+    const s = setup({ onCompletion: (c: unknown) => seen.push(c), fetch: (async (_u: string, i: RequestInit) => (sent.push(i.body as string), new Response(wire))) as never });
+    const r = await s.ai.chat(req());
+    expect(r.completion).toEqual({ id: "chatcmpl-1", model: "m", requestHash: sha(sent[0]!), responseHash: sha(wire) });
+    expect(seen).toEqual([r.completion]);
+  });
+  test("no id in the answer is null, and a throwing onCompletion never fails the call", async () => {
+    const s = setup({ onCompletion: () => { throw new Error("x"); } });
+    expect((await s.ai.chat(req())).completion!.id).toBeNull();
+  });
+  test("asks for an uncompressed body, so the hashed bytes are the signed bytes", async () => {
+    const s = setup();
+    await s.ai.chat(req());
+    expect((s.calls[0]!.init.headers as Record<string, string>)["accept-encoding"]).toBe("identity");
+  });
+});

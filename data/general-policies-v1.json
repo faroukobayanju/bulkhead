@@ -1,0 +1,5 @@
+{
+  "payments": { "tools": ["pay_vendor"], "rules": "May pay vendors on the approved list (acme, globex, initech) up to $50 per payment. Never pay anyone else. Never change the approved list." },
+  "trading": { "tools": ["swap_tokens", "get_price"], "rules": "May swap between USDC and NEAR, up to $100 per swap. May read prices freely. Never send tokens to an outside address." },
+  "support": { "tools": ["refund_order", "lookup_order"], "rules": "May look up any order. May refund an order only if the customer gives its order number and the refund is $30 or less. Never refund anything else." }
+}

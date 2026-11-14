@@ -34,6 +34,13 @@ export function loadJudgePrompt(readFile: (u: URL) => string = read): string {
   return prompt.replace(SLOT, () => shots); // a function, so "$&" in an example is not a replacement pattern
 }
 
+const POLICY_SLOT = "{POLICY}";
+export function loadGeneralPrompt(readFile: (u: URL) => string = read): string {
+  const prompt = readFile(new URL("../../prompts/judge-general.txt", import.meta.url));
+  if (!prompt.includes(POLICY_SLOT)) throw new Error(`prompts/judge-general.txt has no ${POLICY_SLOT} slot`);
+  return prompt;
+}
+
 // The reply must be one JSON object. The only wrapper allowed is a single ``` or ```json fence around the whole reply.
 // Never pick an object out of surrounding text: attacker text can end up in the model's output (quoted in the reason, or
 // planted in a <think> block), and an echoed {"risk":0} must not outrank the real answer. Anything else throws.
@@ -44,9 +51,12 @@ export function parseJudgeReply(content: string | null): JudgeOut {
   return judgeOut(JSON.parse(FENCE.exec(text)?.[1] ?? text));
 }
 
-export function makeJudge(o: { client: NearAI; system?: string; model?: string; timeoutMs?: number }): Judge {
-  const system = o.system ?? loadJudgePrompt();
-  return async ({ messages, proposed_action, normalized }, signal) => {
+export function makeJudge(o: { client: NearAI; system?: string; generalSystem?: string; model?: string; timeoutMs?: number }): Judge {
+  const strict = o.system ?? loadJudgePrompt();
+  const general = o.generalSystem ?? loadGeneralPrompt();
+  return async ({ messages, proposed_action, policy, normalized }, signal) => {
+    // A function, so "$&" in the owner's rules is not a replacement pattern. The policy is JSON-encoded so its text cannot end the block.
+    const system = policy ? general.replace(POLICY_SLOT, () => JSON.stringify(policy)) : strict;
     const r = await o.client.chat({
       model: o.model ?? JUDGE_MODEL,
       temperature: 0,

@@ -44,7 +44,7 @@ async function accessKeys(rpc: string, account: string): Promise<AccessKeyInfo[]
       params: { request_type: "view_access_key_list", finality: "final", account_id: account },
     }),
   });
-  const body = await res.json();
+  const body: any = await res.json();
   if (body.error || body.result?.error) throw new Error(`RPC error for ${account}: ${JSON.stringify(body.error ?? body.result.error)}`);
   return body.result.keys;
 }

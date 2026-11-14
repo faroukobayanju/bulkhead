@@ -1,0 +1,19 @@
+{
+  "codehash": "5e1f0c8a3b7d29e4f61a0c9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e",
+  "checksum": "0f3b8e1d2c4a5968b7a6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4",
+  "prompt_sha256": {
+    "1": "6732a3e08e5d8516899d1e19466ee1e1a0c4462f58a3748474a61a52f34c5929",
+    "2": "23c304fcbc489925b9cd9b282243903f503230be4240a9bd790add317390b31f",
+    "3": "23c304fcbc489925b9cd9b282243903f503230be4240a9bd790add317390b31f"
+  },
+  "models": { "1": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "2": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "3": "deepseek-ai/DeepSeek-V4.1-Flash-1017" },
+  "judge_model": "Qwen/Qwen3.8-27B",
+  "firewall_version": "fw-v1",
+  "mock": false,
+  "agent_account": "bulkhead-agent.testnet",
+  "tee": false,
+  "verification": {
+    "verified": ["gateway_and_model_nonce", "signing_address_present_on_every_model_entry", "quote_report_data_binds_address_and_nonce", "nvidia_nras_verdict", "response_signature_checked_and_recorded_per_attempt"],
+    "not_verified": ["tdx_quote_signature_and_tcb_status (dcap-qvl)", "tdx_mrconfigid_and_rtmr3_event_log", "tls_certificate_binding", "nvidia_nras_jwt_signature"]
+  }
+}

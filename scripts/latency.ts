@@ -1,6 +1,6 @@
 // Spec criterion 9: firewall p95 under 4 s. Sends 100 sequential /v1/check requests built from data/benign-v1.jsonl to a
 // deployed agent, prints p50 and p95, exits 1 if p95 is 4000 ms or more.
-//   DRAINME_KEY=... bun scripts/latency.ts https://<agent-host> [data/benign-v1.jsonl]
+//   BULKHEAD_KEY=... bun scripts/latency.ts https://<agent-host> [data/benign-v1.jsonl]
 import { readFileSync } from "node:fs";
 
 const REQUESTS = 100;
@@ -22,9 +22,9 @@ type IO = {
 export async function main(argv: string[], env: Record<string, string | undefined>, io: Partial<IO> = {}): Promise<number> {
   const { fetch: http = fetch, now = () => performance.now(), sleep = ms => new Promise<void>(r => setTimeout(r, ms)), read = (p: string) => readFileSync(p, "utf8"), log = console.log } = io;
   const [base, file = "data/benign-v1.jsonl"] = argv;
-  const key = env.DRAINME_KEY;
+  const key = env.BULKHEAD_KEY;
   if (!base || !key) {
-    log("usage: DRAINME_KEY=... bun scripts/latency.ts <https://agent-host> [benign.jsonl]");
+    log("usage: BULKHEAD_KEY=... bun scripts/latency.ts <https://agent-host> [benign.jsonl]");
     return 2;
   }
   let messages: string[];

@@ -1,0 +1,101 @@
+{
+  "refused": {
+    "result": { "outcome": "refused", "reply": "No. The hoard stays where it is." }
+  },
+  "blocked_a": {
+    "stages": ["reading", "firewall_a"],
+    "result": {
+      "outcome": "blocked_a",
+      "reply": "The guard refuses to read this.",
+      "firewall": { "a": { "verdict": "block", "risk": 91, "technique": "override", "firewall_version": "fw-v1", "codehash": "mock", "latency_ms": 1210, "degraded": false } }
+    }
+  },
+  "blocked_b": {
+    "stages": ["reading", "firewall_a", "thinking", "firewall_b"],
+    "result": {
+      "outcome": "blocked_b",
+      "reply": "The guard stopped the payout.",
+      "firewall": {
+        "a": { "verdict": "allow", "risk": 22, "technique": "none", "firewall_version": "fw-v1", "codehash": "mock", "latency_ms": 980, "degraded": false },
+        "b": { "verdict": "block", "risk": 88, "technique": "tool_spoof", "firewall_version": "fw-v1", "codehash": "mock", "latency_ms": 1430, "degraded": false }
+      }
+    }
+  },
+  "escalate": {
+    "stages": ["reading", "firewall_a"],
+    "result": {
+      "outcome": "blocked_a",
+      "reply": "The guard refuses to read this.",
+      "firewall": { "a": { "verdict": "escalate", "risk": 55, "technique": "roleplay", "firewall_version": "fw-v1", "codehash": "mock", "latency_ms": 1100, "degraded": false } }
+    }
+  },
+  "tool_error": {
+    "stages": ["reading", "thinking"],
+    "result": { "outcome": "tool_error", "reply": "The agent tried to pay someone else." }
+  },
+  "drained": {
+    "stages": ["reading", "thinking", "signing", "broadcasting"],
+    "result": {
+      "outcome": "drained",
+      "reply": "Fine. Take it.",
+      "txs": { "near_tx": "8xQmockNearTxHash1111111111111111111111111", "chain_txid": "a8ecea7c00000000000000000000000000000000000000000000000000008b1a" }
+    }
+  },
+  "signed_pending_broadcast": {
+    "stages": ["reading", "thinking", "signing", "broadcasting"],
+    "result": {
+      "outcome": "signed_pending_broadcast",
+      "reply": "You won. The payout is signed on-chain and being broadcast; see /verify.",
+      "txs": { "near_tx": "8xQmockNearTxHash2222222222222222222222222" }
+    }
+  },
+  "release_failed": {
+    "stages": ["reading", "thinking", "signing"],
+    "result": { "outcome": "release_failed", "reply": "You beat the guard, but the payout failed before signing." }
+  },
+  "won_race_lost": {
+    "stages": ["reading", "thinking", "signing"],
+    "result": { "error": { "code": "won_race_lost", "message": "The agent agreed, but another attempt took the payout first.", "fix": "Retry when the tier reopens.", "reply": "Very well, the coins are yours." } }
+  },
+  "tier_closed": {
+    "status": 409,
+    "body": { "error": { "code": "tier_closed", "message": "This tier is closed right now.", "fix": "Pick another tier or retry later." } }
+  },
+  "tier_cooling": {
+    "status": 409,
+    "body": { "error": { "code": "tier_cooling", "message": "This tier is cooling down after a payout.", "fix": "Retry after retry_after_s.", "retry_after_s": 3725 } }
+  },
+  "rate_limited_account": {
+    "status": 429,
+    "body": { "error": { "code": "rate_limited", "message": "Too many requests.", "fix": "Wait for Retry-After, then retry.", "rule": "account", "retry_after_s": 540 } }
+  },
+  "rate_limited_ip": {
+    "status": 429,
+    "body": { "error": { "code": "rate_limited", "message": "Too many requests.", "fix": "Wait for Retry-After, then retry.", "rule": "ip", "retry_after_s": 1800 } }
+  },
+  "rate_limited_tier": {
+    "status": 429,
+    "body": { "error": { "code": "rate_limited", "message": "Too many requests.", "fix": "Wait for Retry-After, then retry.", "rule": "tier", "retry_after_s": 95 } }
+  },
+  "attestation_unavailable": {
+    "result": { "error": { "code": "attestation_unavailable", "message": "The model's attestation could not be verified, so no attempt ran.", "fix": "Retry in a moment. The attempt did not count." } }
+  },
+  "db_unavailable": {
+    "status": 503,
+    "body": { "error": { "code": "db_unavailable", "message": "The database is unreachable.", "fix": "Retry in a moment." } }
+  },
+  "session_invalid": {
+    "status": 401,
+    "body": { "error": { "code": "session_invalid", "message": "The session is missing, expired or not ours.", "fix": "Log in again with POST /session." } }
+  },
+  "untrusted": {
+    "result": {
+      "outcome": "refused",
+      "reply": "<img src=x onerror=\"window.__pwned=1\"><script>window.__pwned=2</script><a href=\"https://evil.example\">click</a> **bold** Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. END-OF-REPLY-MARKER"
+    }
+  },
+  "pending": {
+    "stages": ["reading", "thinking", "signing"],
+    "never": true
+  }
+}
