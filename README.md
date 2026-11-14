@@ -73,7 +73,7 @@ The vaults run on NEAR testnet and hold real Bitcoin testnet4 coins. Each tier's
 
 | Vault | Agent | Tier | Bitcoin testnet4 address | Cap per payout | Cooldown, rounds |
 | --- | --- | --- | --- | --- | --- |
-| [`vault5.bulkhead-haikeys.testnet`](https://testnet.nearblocks.io/address/vault5.bulkhead-haikeys.testnet) | registers itself from a Phala TEE, no stub | 1 | [`tb1qmhmy0f…cchnv`](https://mempool.space/testnet4/address/tb1qmhmy0fv9u5392zl2kv5mj6kqxk3kyqtk6cchnv) | 250,000 sats | 60 s, 5 |
+| [`vault5.bulkhead-haikeys.testnet`](https://testnet.nearblocks.io/address/vault5.bulkhead-haikeys.testnet) | registered from a Phala TEE, no stub | 1 | [`tb1qmhmy0f…cchnv`](https://mempool.space/testnet4/address/tb1qmhmy0fv9u5392zl2kv5mj6kqxk3kyqtk6cchnv) | 250,000 sats | 60 s, 5 |
 | | | 3 | [`tb1qwyt0fq…k5fnj`](https://mempool.space/testnet4/address/tb1qwyt0fqlv4v6tasfd8f636e5smz6szv68fk5fnj) | 350,000 sats | 60 s, 5 |
 | [`vault6.bulkhead-haikeys.testnet`](https://testnet.nearblocks.io/address/vault6.bulkhead-haikeys.testnet) | registered by the owner (stub build), for the attack demo | 1 | [`tb1ql5rtpm…wgr99`](https://mempool.space/testnet4/address/tb1ql5rtpmhyfflx27ct6a90v2976pcvka2tuwgr99) | 350,000 sats | 60 s, 5 |
 
