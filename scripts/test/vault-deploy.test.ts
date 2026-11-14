@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { configureTierArgs, derivedKeyCommand, initArgs, isExpiredTx, p2wpkhAddress, parseArgs, tierAddress } from "../lib/vault-deploy";
+import { buildFeatures, configureTierArgs, derivedKeyCommand, initArgs, isExpiredTx, p2wpkhAddress, parseArgs, tierAddress } from "../lib/vault-deploy";
 
 // derived_public_key("bulkhead-tier-1", vault.bulkhead-haikeys.testnet, domain 0) on
 // v1.signer-prod.testnet. Spike S1 spent from this address on testnet4, so the pair is proven.
@@ -70,6 +70,23 @@ describe("arguments", () => {
     expect(() => parseArgs(with_("--max-sats", "0"))).toThrow("--max-sats");
     expect(() => parseArgs(with_("--max-sats", "1.5"))).toThrow("--max-sats");
     expect(() => parseArgs([...base, "--tier", "4"])).toThrow("--tier");
+  });
+
+  test("default build registers a stub agent", () => {
+    const o = parseArgs(base);
+    expect(o.tee).toBe(false);
+    expect(buildFeatures(o)).toBe("stub-attestation");
+  });
+
+  test("--tee builds without the stub, with the 60 s testnet timelock", () => {
+    const o = parseArgs([...base, "--tee", "--vault", "v3.alice.testnet"]);
+    expect(o.tee).toBe(true);
+    expect(o.vault).toBe("v3.alice.testnet");
+    expect(buildFeatures(o)).toBe("testnet-short-timelock");
+  });
+
+  test("--tee takes no --agent: the TEE agent registers itself", () => {
+    expect(() => parseArgs([...base, "--tee", "--agent", "bot.alice.testnet"])).toThrow("--agent");
   });
 
   test("unknown flag is an error, not ignored", () => {
