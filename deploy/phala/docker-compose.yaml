@@ -11,6 +11,8 @@ services:
     image: docker.io/faroukcodes/bulkhead-agent@sha256:be24ef0038f3b8a5d0e497646ecc24cde567c8d344e868b4861ca8396765812a
     platform: linux/amd64
     container_name: bulkhead-agent
+    # root inside the CVM: the dstack socket is root-only, and the image's default user is bun
+    user: "0:0"
     restart: always
     ports:
       - "8787:8787"
