@@ -5,6 +5,7 @@
 #   bash scripts/run-demo.sh [demo-account] [recipient]
 # The default recipient is the live arena's tier 3 address on vault5, so the paid coin tops up that pot.
 set -euo pipefail
+# Bitcoin data comes from blockstream.info's testnet4 Esplora unless MEMPOOL_BASE says otherwise (mempool.space was down on 2026-11-14).
 cd "$(dirname "$0")/.."
 account=${1:-sharpyak2852.testnet}
 recipient=${2:-tb1qwyt0fqlv4v6tasfd8f636e5smz6szv68fk5fnj}
@@ -16,8 +17,8 @@ if [[ -z "$key" ]]; then
   key=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["private_key"])' "$creds")
 fi
 NEAR_NETWORK=testnet NEAR_RPC=https://rpc.testnet.fastnear.com VAULT_ACCOUNT=vault6.bulkhead-haikeys.testnet \
-  AGENT_ACCOUNT="$account" AGENT_PRIVATE_KEY="$key" MEMPOOL_BASE=https://mempool.space/testnet4/api \
+  AGENT_ACCOUNT="$account" AGENT_PRIVATE_KEY="$key" MEMPOOL_BASE="${MEMPOOL_BASE:-https://blockstream.info/testnet4/api}" \
   DEMO_RECIPIENT="$recipient" DEMO_TIER=1 bun scripts/attack-demo.ts --testnet
 echo
 echo "NEAR txs:    https://testnet.nearblocks.io/address/$account"
-echo "Bitcoin tx:  https://mempool.space/testnet4/address/tb1ql5rtpmhyfflx27ct6a90v2976pcvka2tuwgr99"
+echo "Bitcoin tx:  https://blockstream.info/testnet4/address/tb1ql5rtpmhyfflx27ct6a90v2976pcvka2tuwgr99"

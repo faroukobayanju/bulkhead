@@ -154,9 +154,13 @@ export function makeBtc(o: { fetch: typeof fetch; base: string; timeoutMs?: numb
       return rows.filter(r => r?.status?.confirmed === true).map(r => ({ txid: r.txid, vout: r.vout, value_sat: r.value }));
     },
     async feeRate(): Promise<number> {
-      const f = (await get("/v1/fees/recommended"))?.halfHourFee;
+      // mempool.space has /v1/fees/recommended; a plain Esplora (blockstream.info) only has /fee-estimates, keyed by blocks.
+      const f = await get("/v1/fees/recommended").then(
+        r => r?.halfHourFee,
+        async () => (await get("/fee-estimates"))?.["3"],
+      );
       if (typeof f !== "number" || !(f > 0)) throw new Error("mempool fees: bad response");
-      return Math.min(MAX_FEE_RATE, Math.ceil(f));
+      return Math.min(MAX_FEE_RATE, Math.max(1, Math.ceil(f)));
     },
     /** Returns the txid. A tx the network already has counts as sent, so a retry after a lost answer is safe. */
     async broadcast(hex: string): Promise<string> {

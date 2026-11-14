@@ -946,3 +946,12 @@ describe("Base payouts after round 3", () => {
     }
   });
 });
+
+describe("fee rate on a plain Esplora", () => {
+  test("falls back to /fee-estimates when /v1/fees/recommended does not exist (blockstream.info)", async () => {
+    const { makeBtc } = await import("../src/chain/btc");
+    const f = (async (url: string) =>
+      url.endsWith("/v1/fees/recommended") ? new Response("endpoint does not exist", { status: 404 }) : url.endsWith("/fee-estimates") ? Response.json({ "3": 0.495, "144": 0.4 }) : new Response("", { status: 500 })) as unknown as typeof fetch;
+    expect(await makeBtc({ fetch: f, base: "https://blockstream.info/testnet4/api" }).feeRate()).toBe(1);
+  });
+});
