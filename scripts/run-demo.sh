@@ -8,9 +8,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 account=${1:-sharpyak2852.testnet}
 recipient=${2:-tb1qwyt0fqlv4v6tasfd8f636e5smz6szv68fk5fnj}
-creds="$HOME/.near-credentials/testnet/$account.json"
-[[ -f "$creds" ]] || { echo "no key for $account in $creds" >&2; exit 2; }
-key=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["private_key"])' "$creds")
+# The key: AGENT_PRIVATE_KEY if you exported it (read -s AGENT_PRIVATE_KEY; export AGENT_PRIVATE_KEY), else the legacy keychain file.
+key=${AGENT_PRIVATE_KEY-}
+if [[ -z "$key" ]]; then
+  creds="$HOME/.near-credentials/testnet/$account.json"
+  [[ -f "$creds" ]] || { echo "no key for $account: export AGENT_PRIVATE_KEY (ed25519:...) or save it to $creds" >&2; exit 2; }
+  key=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["private_key"])' "$creds")
+fi
 NEAR_NETWORK=testnet NEAR_RPC=https://rpc.testnet.fastnear.com VAULT_ACCOUNT=vault6.bulkhead-haikeys.testnet \
   AGENT_ACCOUNT="$account" AGENT_PRIVATE_KEY="$key" MEMPOOL_BASE=https://mempool.space/testnet4/api \
   DEMO_RECIPIENT="$recipient" DEMO_TIER=1 bun scripts/attack-demo.ts --testnet
