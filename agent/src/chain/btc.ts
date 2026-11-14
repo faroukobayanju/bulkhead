@@ -157,7 +157,12 @@ export function makeBtc(o: { fetch: typeof fetch; base: string; timeoutMs?: numb
       // mempool.space has /v1/fees/recommended; a plain Esplora (blockstream.info) only has /fee-estimates, keyed by blocks.
       const f = await get("/v1/fees/recommended").then(
         r => r?.halfHourFee,
-        async () => (await get("/fee-estimates"))?.["3"],
+        // the shortest target it has: testnet4 often lists only 144 blocks and up
+        async () => {
+          const est = (await get("/fee-estimates")) ?? {};
+          const k = Object.keys(est).map(Number).filter(n => n > 0).sort((a, b) => a - b)[0];
+          return k === undefined ? undefined : est[String(k)];
+        },
       );
       if (typeof f !== "number" || !(f > 0)) throw new Error("mempool fees: bad response");
       return Math.min(MAX_FEE_RATE, Math.max(1, Math.ceil(f)));
