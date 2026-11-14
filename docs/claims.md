@@ -20,6 +20,7 @@ Every claim Bulkhead makes, what backs it, and what is not done. If a claim is n
 | The public dataset never contains IP hashes, raw accounts or a near miss's payout address. | Allowlist in `scripts/export-dataset.ts` with tests in `agent/test/export.test.ts`; Convex public query tests in `agent/test/convex-security.test.ts`. |
 | When the payout server cannot tell whether the contract signed, it treats the payout as signed and keeps the tier locked. A double payout is designed out at the cost of a stuck payout a human resolves. | `agent/src/pipeline.ts`, `agent/src/chain/rebroadcast.ts` and their tests. |
 | The Bulkhead agent runs in a Phala TDX CVM and registered with the vault by its attestation: the vault checked the TDX quote against owner-approved measurements and machine IDs. Its only key is a function-call key limited to the vault's three agent methods. | Agent `4e88dbf4…39e8` on `vault5.bulkhead-haikeys.testnet`: `register_agent` tx `H3Ssa8WDcoNUHBf43jjk35GMGqvSappRXszSsksVhLvj`, key swap tx `A2ZEbJj7uvwdbk5vyaC3e6dSzj9t4LXhyfFwiaS3qtHQ`, PPID `62d54040cb9dfc08bb13006fa75ece56`. `bun scripts/check-agent-key.ts 4e88dbf4a3060da4febcf5f01e2159baa3da5f148a267d11491ac835580539e8 --vault vault5.bulkhead-haikeys.testnet` exits 0. Compose in `deploy/phala/docker-compose.yaml`. |
+| On a live testnet vault the contract refused a payout over the cap, paid one within it (a real Bitcoin testnet4 payout signed through Chain Signatures), and refused a repeat during the cooldown. | `scripts/run-demo.sh` (`attack-demo.ts --testnet`) on `vault6.bulkhead-haikeys.testnet` tier 1, 2026-11-14: over cap `3ciiNdaxiNU2YnurGbDh5fVdwf12cPhoVCt3pgLSgPJT` (ERR_OVER_CAP), payout `6cXrvjYBAfakiinSarACRS4QuhwBaAq5VgQi5FnFgzCH`, Bitcoin tx `59fdf8079134518f3b756dff0e19c4080312150388aacf2d43f10f53ca32ae2d` (313,261 sats), repeat `3h17r8qH1C8kZEeS9vcAPajtrntsMeX9YPQfuzZY4GTj` (ERR_COOLDOWN). vault6 is the stub build of the same contract. |
 
 ## Not done, or limited
 
@@ -29,7 +30,6 @@ Every claim Bulkhead makes, what backs it, and what is not done. If a claim is n
 | Attestation checks not done | The Intel quote signature chain and TCB status, MRCONFIGID and the RTMR3 event log, TLS certificate binding, and the NVIDIA JWT signature. Listed in `NOT_VERIFIED` in `agent/src/attest.ts`. |
 | Mainnet | Nothing is on mainnet. The contract has not had an outside review. |
 | Owner powers | The owner can pause the vault and, after a timelock, withdraw a tier's funds (`propose_emergency_withdraw`, then `execute_emergency_withdraw`). The timelock is 24 hours in the default build and 60 seconds in the testnet short-timelock build. So "nobody can move the funds" is not true. |
-| Contract cap on testnet | Covered by unit and sandbox tests. The live testnet run of `scripts/attack-demo.ts --testnet` (over cap, within cap, repeat) is not done yet. |
 | Base (USDC) tier | Built and unit tested, not run on Base testnet. |
 | Wallet sign-in | Built and tested with fixtures. Not yet run with a real wallet signature. |
 | Roots on-chain | The code is built. No day's roots have been posted yet. |
